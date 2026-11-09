@@ -8,7 +8,7 @@
 	Cross / logo  minimize / unminimize the bar
 	Click a tab   open its panel, click again to close it
 
-	Tabs: Aim, Movement, ESP, Macros (empty for now), Environment, Settings.
+	Tabs: Aim (restricted), Movement, ESP, Macros, Environment, Owner (owners only), Settings.
 	All icons are drawn in code, no asset IDs.
 
 	Add content to a tab later:
@@ -38,6 +38,22 @@ local CONFIG = {
 	ToggleKey = Enum.KeyCode.RightShift,
 	ShowLoader = true,
 }
+
+-- Access: owners always have the Aim tab and get the Owner tab.
+-- Api = base URL of the access backend (kevinware_access_worker.js), no trailing slash.
+local ACCESS = {
+	Api = "https://red-cherry-23bc.bexstfn.workers.dev",
+	Owners = { "mediccl", "latinolyfe" },
+}
+local IS_OWNER = false
+do
+	local me = string.lower(LocalPlayer.Name)
+	for _, n in ipairs(ACCESS.Owners) do
+		if string.lower(n) == me then
+			IS_OWNER = true
+		end
+	end
+end
 
 -- remove a previous run (this script or the earlier test scripts)
 pcall(function()
@@ -477,14 +493,14 @@ local function buildIcon(kind, size, parent, color, thickness)
 		reg(f, "BackgroundColor3")
 	end
 
-	local function pill(cx, cy, w, h)
+	local function pill(cx, cy, w, h, r)
 		local f = frame({
 			AnchorPoint = Vector2.new(0.5, 0.5),
 			Position = UDim2.fromOffset(cx * s, cy * s),
 			Size = UDim2.fromOffset(w * s, h * s),
 			BackgroundColor3 = color,
 		}, holder)
-		corner(f, 999)
+		corner(f, r and r * s or 999)
 		reg(f, "BackgroundColor3")
 	end
 
@@ -552,6 +568,17 @@ local function buildIcon(kind, size, parent, color, thickness)
 		seg(3, 9, 18)
 		seg(19, 21, 18)
 		dot(14, 18, 5)
+	elseif kind == "lock" then
+		box(12, 8.5, 9, 10, 4.5)
+		pill(12, 16, 15, 9.5, 3)
+	elseif kind == "owner" then
+		line(3, 18, 21, 18)
+		line(3, 18, 3, 8)
+		line(3, 8, 8, 13)
+		line(8, 13, 12, 6)
+		line(12, 6, 16, 13)
+		line(16, 13, 21, 8)
+		line(21, 8, 21, 18)
 	elseif kind == "cross" then
 		line(5, 5, 19, 19)
 		line(19, 5, 5, 19)
@@ -810,6 +837,50 @@ function Cfg.copy(text)
 	return (pcall(fn, text))
 end
 
+-- small text store (owner key, loader flag): file if the executor has one, else this session only
+function Cfg.writeText(name, text)
+	pcall(function()
+		getgenv().KevinwareText = getgenv().KevinwareText or {}
+		getgenv().KevinwareText[name] = text
+	end)
+	if Cfg.canFile() then
+		pcall(function()
+			if type(makefolder) == "function" and type(isfolder) == "function" and not isfolder("Kevinware") then
+				makefolder("Kevinware")
+			end
+		end)
+		pcall(writefile, "Kevinware/" .. name .. ".txt", text)
+	end
+end
+
+function Cfg.readText(name)
+	if Cfg.canFile() then
+		local path = "Kevinware/" .. name .. ".txt"
+		local ok, exists = pcall(isfile, path)
+		if ok and exists then
+			local ok2, txt = pcall(readfile, path)
+			if ok2 then
+				return txt
+			end
+		end
+	end
+	local ok, v = pcall(function()
+		return getgenv().KevinwareText and getgenv().KevinwareText[name]
+	end)
+	if ok then
+		return v
+	end
+	return nil
+end
+
+function Cfg.writeFlag(name, on)
+	Cfg.writeText(name, on and "1" or "0")
+end
+
+function Cfg.readFlag(name)
+	return (Cfg.readText(name) or "") == "1"
+end
+
 --========================================================================
 -- TABS + LAYOUT MATH (deterministic, no AutomaticSize)
 --========================================================================
@@ -819,8 +890,11 @@ local TABS = {
 	{ id = "ESP", label = "ESP", icon = "esp" },
 	{ id = "Macros", label = "Macros", icon = "macros" },
 	{ id = "Environment", label = "Environment", icon = "environment" },
-	{ id = "Settings", label = "Settings", icon = "settings", gapBefore = 22 },
 }
+if IS_OWNER then
+	table.insert(TABS, { id = "Owner", label = "Owner", icon = "owner" })
+end
+table.insert(TABS, { id = "Settings", label = "Settings", icon = "settings", gapBefore = 22 })
 
 local tabsWidth = 0
 do
@@ -1059,7 +1133,7 @@ local crossGroup = new("CanvasGroup", {
 }, crossBtn)
 local crossIcon = buildIcon("cross", 20, crossGroup, rgb(236, 237, 241))
 
-local logoGroup, logoScale = buildLogo(26, crossBtn)
+local logoGroup, logoScale = buildLogo(28, crossBtn)
 logoGroup.GroupTransparency = 1
 logoScale.Scale = 0.5
 hoverable(crossBtn, crossBtn, 0.9, 0.82, 0.74)
@@ -1885,6 +1959,15 @@ function COMP.Segmented(g, o)
 	local n = #opts
 	local r = newRow(g, 84)
 	rowLabel(r, o.text, nil, 0.6)
+
+	local selected = o.default
+	if selected == nil then
+		selected = opts[1]
+	elseif selected == false then
+		selected = nil
+	end
+	local indAlpha = 0.84
+
 	local barF = frame({
 		Position = UDim2.new(0, 16, 0, 40),
 		Size = UDim2.new(1, -32, 0, 34),
@@ -1897,27 +1980,33 @@ function COMP.Segmented(g, o)
 		Position = UDim2.new(0, 3, 0, 3),
 		Size = UDim2.new(1 / n, -6, 1, -6),
 		BackgroundColor3 = C.white,
-		BackgroundTransparency = 0.84,
+		BackgroundTransparency = selected and indAlpha or 1,
 		ZIndex = 2,
 	}, barF)
 	corner(ind, 14)
-	local indStroke = stroke(ind, 0.8)
+	local indStroke = stroke(ind, selected and 0.8 or 1)
 	Theme.bind(function(v, instant)
 		local d = instant and 0 or 0.3
-		setProps(ind, d, { BackgroundColor3 = v.accent, BackgroundTransparency = luma(v.accent) > 0.8 and 0.84 or 0.78 })
+		indAlpha = luma(v.accent) > 0.8 and 0.84 or 0.78
+		setProps(ind, d, { BackgroundColor3 = v.accent })
 		setProps(indStroke, d, { Color = v.accent })
+		if selected then
+			setProps(ind, d, { BackgroundTransparency = indAlpha })
+		end
 	end)
 
-	local selected = o.default or opts[1]
 	local buttons = {}
 	local function render(animate)
 		for i, name in ipairs(opts) do
 			if name == selected then
-				local pos = UDim2.new((i - 1) / n, 3, 0, 3)
-				setProps(ind, animate and 0.4 or 0, { Position = pos })
+				setProps(ind, animate and 0.4 or 0, { Position = UDim2.new((i - 1) / n, 3, 0, 3) })
 			end
-			tween(buttons[name], 0.2, { TextColor3 = name == selected and C.white or C.sub })
+			if buttons[name] then
+				tween(buttons[name], 0.2, { TextColor3 = name == selected and C.white or C.sub })
+			end
 		end
+		tween(ind, 0.25, { BackgroundTransparency = selected and indAlpha or 1 })
+		tween(indStroke, 0.25, { Transparency = selected and 0.8 or 1 })
 	end
 	for i, name in ipairs(opts) do
 		local b = new("TextButton", {
@@ -1929,7 +2018,7 @@ function COMP.Segmented(g, o)
 			Size = UDim2.new(1 / n, 0, 1, 0),
 			Font = Enum.Font.GothamMedium,
 			TextSize = 13,
-			TextColor3 = C.sub,
+			TextColor3 = name == selected and C.white or C.sub,
 			ZIndex = 3,
 		}, barF)
 		buttons[name] = b
@@ -1956,9 +2045,7 @@ function COMP.Segmented(g, o)
 	end
 	function api.Clear()
 		selected = nil
-		for _, b in pairs(buttons) do
-			tween(b, 0.2, { TextColor3 = C.sub })
-		end
+		render(true)
 	end
 	return api
 end
@@ -2038,9 +2125,15 @@ function COMP.Swatches(g, o)
 	render()
 
 	local api = { Row = r }
-	function api.Set(name)
+	function api.Get()
+		return selected or "Custom"
+	end
+	function api.Set(name, silent)
 		selected = name
 		render()
+		if not silent and name and o.callback then
+			o.callback(name)
+		end
 	end
 	return api
 end
@@ -2194,6 +2287,17 @@ function COMP.Keybind(g, o)
 		AnchorPoint = Vector2.new(1, 0.5),
 		Position = UDim2.new(1, -16, 0.5, 0),
 	})
+	local api = { Row = r }
+	function api.Get()
+		return key
+	end
+	function api.Set(k, silent)
+		key = k
+		btn.SetText(keyName(key))
+		if not silent and o.callback then
+			o.callback(key)
+		end
+	end
 	btn.Button.MouseButton1Click:Connect(function()
 		if state.listening then
 			return
@@ -2210,15 +2314,13 @@ function COMP.Keybind(g, o)
 				state.listening = false
 			end)
 			if input.KeyCode ~= Enum.KeyCode.Escape then
-				key = input.KeyCode
-				if o.callback then
-					o.callback(key)
-				end
+				api.Set(input.KeyCode)
+			else
+				btn.SetText(keyName(key))
 			end
-			btn.SetText(keyName(key))
 		end)
 	end)
-	return { Row = r }
+	return api
 end
 
 -- ------------------------------------------------------------- text input
@@ -2282,201 +2384,82 @@ function COMP.Button(g, o)
 end
 
 --========================================================================
--- CONFIG HOOKS
--- Components created with a `key` register themselves with the config
--- store (Cfg) and tell it when they change (autosave). Options understood:
---   key       config key to save under
---   noConfig  opt out even if a key is given
---   noReset   keep the current value when an imported config omits this key
---   skip      function; return true to leave this key out of exports
---   noExport  never export this key
--- The wrappers below sit on top of the components above, which are untouched.
+-- CONFIG WIRING: any component created with `key = "..."` is saved/exported
 --========================================================================
-do
-	local function keyed(o)
-		return o.key ~= nil and not o.noConfig
-	end
-
-	-- copy of the options whose callback also tracks / flags changes for autosave
-	local function hook(o, track)
-		local k = keyed(o)
-		if not k and not track then
-			return o
-		end
-		local copy = {}
-		for key, value in pairs(o) do
-			copy[key] = value
-		end
+local function wrapComponent(name, make)
+	local orig = COMP[name]
+	COMP[name] = function(g, o)
 		local cb = o.callback
-		copy.callback = function(...)
-			if track then
-				track(...)
-			end
-			if cb then
-				cb(...)
-			end
-			if k then
+		if o.key then
+			o.callback = function(...)
+				if cb then
+					cb(...)
+				end
 				Cfg.dirty()
 			end
 		end
-		return copy
-	end
-
-	-- get() returns a JSON-safe value, set(v) applies one (and fires the component's callback)
-	local function register(o, get, set)
-		if not keyed(o) then
-			return
+		local api = orig(g, o)
+		if o.key then
+			local get, set = make(o, api)
+			Cfg.add(o.key, get, set, { noReset = o.noReset, skip = o.skip, noExport = o.noConfig })
 		end
-		Cfg.add(o.key, get, function(v)
-			if get() ~= v then
-				set(v)
-			end
-		end, {
-			-- a conditionally exported key (skip) being absent doesn't mean "reset it"
-			noReset = o.noReset or o.skip ~= nil,
-			skip = o.skip,
-			noExport = o.noExport,
-		})
-	end
-
-	local rawToggle = COMP.Toggle
-	function COMP.Toggle(g, o)
-		local api = rawToggle(g, hook(o))
-		register(o, api.Get, function(v)
-			api.Set(v == true)
-		end)
-		return api
-	end
-
-	local rawSlider = COMP.Slider
-	function COMP.Slider(g, o)
-		local api = rawSlider(g, hook(o))
-		register(o, api.Get, function(v)
-			if type(v) == "number" then
-				api.Set(v)
-			end
-		end)
-		return api
-	end
-
-	local rawDropdown = COMP.Dropdown
-	function COMP.Dropdown(g, o)
-		local api = rawDropdown(g, hook(o))
-		register(o, api.Get, function(v)
-			if table.find(o.options, v) then
-				api.Set(v)
-			end
-		end)
-		return api
-	end
-
-	local rawSegmented = COMP.Segmented
-	function COMP.Segmented(g, o)
-		local api = rawSegmented(g, hook(o))
-		register(o, api.Get, function(v)
-			if table.find(o.options, v) then
-				api.Set(v)
-			end
-		end)
-		return api
-	end
-
-	-- swatches have no getter of their own, so track the selection here
-	local rawSwatches = COMP.Swatches
-	function COMP.Swatches(g, o)
-		local cur = o.default
-		local cb = o.callback
-		local valid = {}
-		for _, item in ipairs(o.items) do
-			valid[item.name] = true
-		end
-		local api = rawSwatches(
-			g,
-			hook(o, function(name)
-				cur = name
-			end)
-		)
-		local rawSet = api.Set
-		function api.Set(name)
-			cur = name
-			rawSet(name)
-		end
-		function api.Get()
-			return cur
-		end
-		register(o, api.Get, function(v)
-			if valid[v] then
-				api.Set(v)
-				if cb then
-					cb(v)
-				end
-			end
-		end)
-		return api
-	end
-
-	-- colours are stored as hex strings so they survive JSON
-	local rawPicker = COMP.ColorPicker
-	function COMP.ColorPicker(g, o)
-		local api = rawPicker(g, hook(o))
-		register(o, function()
-			return toHex(api.Get())
-		end, function(hex)
-			local c = type(hex) == "string" and fromHex(hex)
-			if c then
-				api.Set(c)
-			end
-		end)
-		return api
-	end
-
-	-- keybinds are stored by KeyCode name
-	local rawKeybind = COMP.Keybind
-	function COMP.Keybind(g, o)
-		local cur = o.default
-		local api = rawKeybind(
-			g,
-			hook(o, function(k)
-				cur = k
-			end)
-		)
-		local btn = api.Row:FindFirstChildOfClass("TextButton")
-		local lbl = btn and btn:FindFirstChildOfClass("TextLabel")
-		if lbl then
-			-- keep the button text matching the real key (e.g. after Escape-cancelling a rebind
-			-- once a config has changed the key)
-			lbl:GetPropertyChangedSignal("Text"):Connect(function()
-				local want = keyName(cur)
-				if lbl.Text ~= want and lbl.Text ~= "Press a key..." then
-					lbl.Text = want
-				end
-			end)
-		end
-		function api.Get()
-			return cur
-		end
-		function api.Set(k, silent)
-			cur = k
-			if lbl then
-				lbl.Text = keyName(k)
-			end
-			if not silent and o.callback then
-				o.callback(k)
-			end
-		end
-		register(o, function()
-			return cur.Name
-		end, function(name)
-			local ok, k = pcall(function()
-				return Enum.KeyCode[name]
-			end)
-			if ok and typeof(k) == "EnumItem" then
-				api.Set(k)
-			end
-		end)
 		return api
 	end
 end
+
+wrapComponent("Toggle", function(o, api)
+	return api.Get, function(v)
+		api.Set(v == true)
+	end
+end)
+wrapComponent("Slider", function(o, api)
+	return api.Get, function(v)
+		if type(v) == "number" then
+			api.Set(v)
+		end
+	end
+end)
+wrapComponent("Dropdown", function(o, api)
+	return api.Get, function(v)
+		if table.find(o.options, v) then
+			api.Set(v)
+		end
+	end
+end)
+wrapComponent("Segmented", function(o, api)
+	return api.Get, function(v)
+		if table.find(o.options, v) then
+			api.Set(v)
+		end
+	end
+end)
+wrapComponent("Swatches", function(o, api)
+	return api.Get, function(v)
+		if v ~= "Custom" then
+			api.Set(v)
+		end
+	end
+end)
+wrapComponent("ColorPicker", function(o, api)
+	return function()
+		return toHex(api.Get())
+	end, function(h)
+		local c = fromHex(h)
+		if c then
+			api.Set(c)
+		end
+	end
+end)
+wrapComponent("Keybind", function(o, api)
+	return function()
+		return api.Get().Name
+	end, function(n)
+		local k = Enum.KeyCode[n]
+		if k then
+			api.Set(k)
+		end
+	end
+end)
 
 --========================================================================
 -- FPS / PING HUD
@@ -2929,8 +2912,9 @@ function Perf.restoreAll()
 			settings().Rendering.QualityLevel = Perf.origQuality
 		end)
 	end
-	if Perf.origFps and type(setfpscap) == "function" then
-		pcall(setfpscap, Perf.origFps)
+	local fpsFn = fpsSetter()
+	if Perf.origFps and fpsFn then
+		pcall(fpsFn, Perf.origFps)
 	end
 end
 onUnload(Perf.restoreAll)
@@ -2940,7 +2924,7 @@ onUnload(Perf.restoreAll)
 -- Presets override the game's own sky / atmosphere / color grading and
 -- re-apply themselves if the game changes them back.
 --========================================================================
-local Env = { desired = {}, busy = 0, lock = true, override = true, orig = {}, ui = {}, touched = false }
+local Env = { desired = {}, busy = 0, lock = true, override = true, orig = {}, ui = {}, touched = false, hideDomes = true }
 local ENV_PROPS = {
 	"ClockTime",
 	"Brightness",
@@ -3192,6 +3176,7 @@ end
 
 function Env.syncAll()
 	Env.refreshDomes()
+	Env.ensureFx()
 	local skyOn = Env.skyFaces ~= nil or Env.skyProps ~= nil
 	local atmOn = Env.atmosProps ~= nil
 	local gradeOn = Env.override and Env.touched
@@ -3212,7 +3197,7 @@ function Env.syncAll()
 				if c ~= Env.ownAtmos then
 					table.insert(gameAtmos, c)
 				end
-			elseif cn == "ColorCorrectionEffect" then
+			elseif cn == "ColorCorrectionEffect" and c.Name ~= "KevinwareGrade" then
 				if gradeOn then
 					if Env.gradeStore[c] == nil then
 						Env.gradeStore[c] = c.Enabled
@@ -3325,6 +3310,10 @@ end
 
 function Env.resetSky()
 	Env.skyFaces, Env.skyProps, Env.atmosProps, Env.skyFacesForce = nil, nil, nil, false
+	Env.fx = nil
+	Env.ensureFx()
+	Env.release("Sky")
+	Env.release("Atmosphere")
 	for _, c in ipairs(Lighting:GetChildren()) do
 		if c:IsA("Sky") and Env.skyStore[c] then
 			restoreProps(c, Env.skyStore[c])
@@ -3334,61 +3323,210 @@ function Env.resetSky()
 			Env.atmosStore[c] = nil
 		end
 	end
-	if Env.ownSky then
-		Env.ownSky:Destroy()
-		Env.ownSky = nil
+	dropOwn("Sky")
+	dropOwn("Atmosphere")
+end
+
+-- our own colour grade / bloom / sun rays (only exist while a sky theme asks for them)
+function Env.ensureFx()
+	local fx = Env.fx
+	if not fx then
+		if Env.fxMade then
+			for _, n in ipairs({ "KevinwareGrade", "KevinwareBloom", "KevinwareRays" }) do
+				local i = Lighting:FindFirstChild(n)
+				if i then
+					i:Destroy()
+				end
+			end
+			Env.fxMade = false
+		end
+		return
 	end
-	if Env.ownAtmos then
-		Env.ownAtmos:Destroy()
-		Env.ownAtmos = nil
+	Env.fxMade = true
+	local function get(class, name)
+		local i = Lighting:FindFirstChild(name)
+		if not i or i.ClassName ~= class then
+			if i then
+				i:Destroy()
+			end
+			i = Instance.new(class)
+			i.Name = name
+			i.Parent = Lighting
+		end
+		return i
+	end
+	pushProps(get("ColorCorrectionEffect", "KevinwareGrade"), {
+		TintColor = fx.tint,
+		Saturation = fx.sat,
+		Contrast = fx.contrast,
+		Brightness = fx.bright,
+		Enabled = true,
+	})
+	pushProps(get("BloomEffect", "KevinwareBloom"), {
+		Intensity = fx.bloom[1],
+		Size = fx.bloom[2],
+		Threshold = fx.bloom[3],
+		Enabled = true,
+	})
+	pushProps(get("SunRaysEffect", "KevinwareRays"), {
+		Intensity = fx.rays[1],
+		Spread = fx.rays[2],
+		Enabled = true,
+	})
+end
+
+function Env.cloudsTheme(c)
+	local cl = Env.getClouds(true)
+	if cl then
+		cl.Enabled = true
+		cl.Cover = c.Cover
+		cl.Density = c.Density
+		cl.Color = c.Color
 	end
 end
 
+-- Presets use Roblox's own six-face sky cube, so the whole sky is always covered,
+-- and lean on atmosphere + clouds + grading for the look.
 local SKY_THEMES = {
-	Clear = {
-		sky = { StarCount = 0, CelestialBodiesShown = true },
-		atmos = { Density = 0.12, Offset = 0, Color = rgb(199, 214, 235), Decay = rgb(106, 125, 150), Glare = 0, Haze = 0 },
+	["Clear day"] = {
+		sky = { StarCount = 0, CelestialBodiesShown = true, SunAngularSize = 21 },
+		atmos = { Density = 0.18, Offset = 0, Color = rgb(199, 214, 235), Decay = rgb(106, 125, 150), Glare = 0, Haze = 0 },
+		light = { ClockTime = 13, Brightness = 3, Ambient = rgb(128, 128, 128), OutdoorAmbient = rgb(160, 160, 165), ColorShift_Top = rgb(0, 0, 0), ExposureCompensation = 0 },
+		clouds = { Cover = 0.35, Density = 0.55, Color = rgb(255, 255, 255) },
+		fx = { tint = rgb(255, 255, 255), sat = 0.1, contrast = 0.04, bright = 0, bloom = { 0.25, 24, 1 }, rays = { 0.06, 0.5 } },
 	},
-	Sunset = {
-		sky = { StarCount = 0, CelestialBodiesShown = true },
-		atmos = { Density = 0.38, Offset = 0.25, Color = rgb(255, 165, 120), Decay = rgb(150, 70, 90), Glare = 0.9, Haze = 1.8 },
+	["Golden hour"] = {
+		sky = { StarCount = 0, CelestialBodiesShown = true, SunAngularSize = 26 },
+		atmos = { Density = 0.34, Offset = 0.2, Color = rgb(255, 200, 150), Decay = rgb(170, 100, 70), Glare = 0.7, Haze = 1.4 },
+		light = { ClockTime = 17.4, Brightness = 2.4, Ambient = rgb(120, 100, 90), OutdoorAmbient = rgb(190, 150, 120), ColorShift_Top = rgb(255, 190, 120), ExposureCompensation = 0.1 },
+		clouds = { Cover = 0.45, Density = 0.6, Color = rgb(255, 210, 170) },
+		fx = { tint = rgb(255, 238, 220), sat = 0.15, contrast = 0.05, bright = 0, bloom = { 0.35, 24, 0.9 }, rays = { 0.12, 0.6 } },
 	},
-	Dusk = {
-		sky = { StarCount = 800, CelestialBodiesShown = true },
-		atmos = { Density = 0.3, Offset = 0.1, Color = rgb(190, 150, 230), Decay = rgb(90, 50, 130), Glare = 0.2, Haze = 1.2 },
+	["Sunset"] = {
+		sky = { StarCount = 0, CelestialBodiesShown = true, SunAngularSize = 30 },
+		atmos = { Density = 0.4, Offset = 0.25, Color = rgb(255, 150, 110), Decay = rgb(150, 70, 90), Glare = 0.9, Haze = 1.8 },
+		light = { ClockTime = 18.3, Brightness = 1.8, Ambient = rgb(92, 68, 88), OutdoorAmbient = rgb(150, 104, 112), ColorShift_Top = rgb(255, 136, 88), ExposureCompensation = 0.1 },
+		clouds = { Cover = 0.5, Density = 0.65, Color = rgb(255, 170, 140) },
+		fx = { tint = rgb(255, 228, 225), sat = 0.2, contrast = 0.06, bright = 0, bloom = { 0.4, 26, 0.85 }, rays = { 0.16, 0.65 } },
 	},
-	Starry = {
+	["Twilight"] = {
+		sky = { StarCount = 1500, CelestialBodiesShown = true },
+		atmos = { Density = 0.32, Offset = 0.12, Color = rgb(190, 150, 230), Decay = rgb(90, 50, 130), Glare = 0.2, Haze = 1.3 },
+		light = { ClockTime = 19.3, Brightness = 1.3, Ambient = rgb(66, 56, 96), OutdoorAmbient = rgb(100, 86, 140), ColorShift_Top = rgb(170, 130, 220), ExposureCompensation = 0 },
+		clouds = { Cover = 0.4, Density = 0.55, Color = rgb(210, 180, 240) },
+		fx = { tint = rgb(238, 230, 255), sat = 0.2, contrast = 0.06, bright = 0, bloom = { 0.35, 24, 0.9 }, rays = { 0.05, 0.4 } },
+	},
+	["Neon night"] = {
+		sky = { StarCount = 6000, CelestialBodiesShown = true, MoonAngularSize = 14 },
+		atmos = { Density = 0.3, Offset = 0.2, Color = rgb(120, 60, 200), Decay = rgb(30, 10, 80), Glare = 0.2, Haze = 2 },
+		light = { ClockTime = 0, Brightness = 1, Ambient = rgb(50, 30, 90), OutdoorAmbient = rgb(80, 50, 140), ColorShift_Top = rgb(140, 80, 255), ExposureCompensation = 0.1 },
+		clouds = { Cover = 0.3, Density = 0.5, Color = rgb(150, 90, 230) },
+		fx = { tint = rgb(215, 195, 255), sat = 0.3, contrast = 0.1, bright = 0, bloom = { 0.6, 30, 0.8 }, rays = { 0, 0.3 } },
+	},
+	["Deep space"] = {
+		sky = { StarCount = 9000, CelestialBodiesShown = true, MoonAngularSize = 20 },
+		atmos = { Density = 0.04, Offset = 0, Color = rgb(30, 45, 100), Decay = rgb(8, 12, 36), Glare = 0, Haze = 0 },
+		light = { ClockTime = 0, Brightness = 0.8, Ambient = rgb(24, 30, 58), OutdoorAmbient = rgb(40, 52, 96), ColorShift_Top = rgb(40, 60, 120), ExposureCompensation = 0 },
+		clouds = { Cover = 0, Density = 0, Color = rgb(255, 255, 255) },
+		fx = { tint = rgb(225, 235, 255), sat = 0.15, contrast = 0.1, bright = 0, bloom = { 0.45, 28, 0.85 }, rays = { 0, 0.3 } },
+	},
+	["Aurora"] = {
 		sky = { StarCount = 5000, CelestialBodiesShown = true },
-		atmos = { Density = 0.06, Offset = 0, Color = rgb(40, 55, 110), Decay = rgb(15, 20, 50), Glare = 0, Haze = 0 },
-	},
-	Aurora = {
-		sky = { StarCount = 3500, CelestialBodiesShown = true },
 		atmos = { Density = 0.25, Offset = 0.2, Color = rgb(110, 255, 200), Decay = rgb(60, 40, 140), Glare = 0.1, Haze = 1 },
+		light = { ClockTime = 0.5, Brightness = 1, Ambient = rgb(30, 60, 80), OutdoorAmbient = rgb(50, 110, 120), ColorShift_Top = rgb(90, 255, 190), ExposureCompensation = 0.1 },
+		clouds = { Cover = 0.25, Density = 0.4, Color = rgb(150, 255, 220) },
+		fx = { tint = rgb(215, 255, 240), sat = 0.25, contrast = 0.08, bright = 0, bloom = { 0.55, 30, 0.8 }, rays = { 0, 0.3 } },
 	},
-	Fog = {
-		sky = { StarCount = 0, CelestialBodiesShown = true },
+	["Overcast"] = {
+		sky = { StarCount = 0, CelestialBodiesShown = false },
 		atmos = { Density = 0.55, Offset = 0, Color = rgb(205, 210, 220), Decay = rgb(160, 168, 180), Glare = 0, Haze = 3.5 },
+		light = { ClockTime = 13, Brightness = 1.8, Ambient = rgb(120, 124, 132), OutdoorAmbient = rgb(150, 154, 162), ColorShift_Top = rgb(0, 0, 0), ExposureCompensation = 0 },
+		clouds = { Cover = 0.95, Density = 0.8, Color = rgb(190, 195, 205) },
+		fx = { tint = rgb(240, 244, 250), sat = -0.15, contrast = 0.03, bright = 0, bloom = { 0.15, 20, 1 }, rays = { 0, 0.3 } },
 	},
-	Void = {
+	["Storm"] = {
+		sky = { StarCount = 0, CelestialBodiesShown = false },
+		atmos = { Density = 0.62, Offset = 0, Color = rgb(120, 128, 142), Decay = rgb(60, 66, 78), Glare = 0, Haze = 6 },
+		light = { ClockTime = 14, Brightness = 1.1, Ambient = rgb(70, 74, 84), OutdoorAmbient = rgb(96, 102, 114), ColorShift_Top = rgb(0, 0, 0), ExposureCompensation = -0.1 },
+		clouds = { Cover = 1, Density = 0.9, Color = rgb(90, 96, 108) },
+		fx = { tint = rgb(225, 232, 245), sat = -0.3, contrast = 0.12, bright = -0.02, bloom = { 0.1, 20, 1 }, rays = { 0, 0.3 } },
+	},
+	["Blood moon"] = {
+		sky = { StarCount = 4000, CelestialBodiesShown = true, MoonAngularSize = 26 },
+		atmos = { Density = 0.35, Offset = 0.15, Color = rgb(200, 50, 50), Decay = rgb(90, 15, 20), Glare = 0.3, Haze = 2.2 },
+		light = { ClockTime = 0, Brightness = 1, Ambient = rgb(70, 20, 24), OutdoorAmbient = rgb(120, 36, 40), ColorShift_Top = rgb(255, 70, 70), ExposureCompensation = 0 },
+		clouds = { Cover = 0.35, Density = 0.55, Color = rgb(190, 70, 70) },
+		fx = { tint = rgb(255, 215, 215), sat = 0.2, contrast = 0.1, bright = 0, bloom = { 0.45, 26, 0.85 }, rays = { 0, 0.3 } },
+	},
+	["Void"] = {
 		sky = { StarCount = 0, CelestialBodiesShown = false },
 		atmos = { Density = 0.95, Offset = 1, Color = rgb(0, 0, 0), Decay = rgb(0, 0, 0), Glare = 0, Haze = 10 },
+		light = { ClockTime = 0, Brightness = 0.5, Ambient = rgb(10, 10, 14), OutdoorAmbient = rgb(18, 18, 24), ColorShift_Top = rgb(0, 0, 0), ExposureCompensation = 0 },
+		clouds = { Cover = 0, Density = 0, Color = rgb(0, 0, 0) },
+		fx = { tint = rgb(255, 255, 255), sat = -0.2, contrast = 0.1, bright = 0, bloom = { 0, 20, 1 }, rays = { 0, 0.3 } },
 	},
 }
-local SKY_NAMES = { "Game default", "Clear", "Sunset", "Dusk", "Starry", "Aurora", "Fog", "Void" }
+
+-- complete six-face image sets pulled from public script snippets (not tested in-game)
+local SKY_PACKS = {
+	["Community 1"] = { Bk = "92464172", Dn = "92464250", Ft = "92464217", Lf = "92464234", Rt = "92464189", Up = "92464157" },
+	["Community 2"] = { Bk = "144933338", Dn = "144931530", Ft = "144933262", Lf = "144933244", Rt = "144933299", Up = "144931564" },
+	["Community 3 (red)"] = { Bk = "1012890", Dn = "1012891", Ft = "1012887", Lf = "1012889", Rt = "1012888", Up = "1014449" },
+}
+local SKY_NAMES = {
+	"Game default",
+	"Clear day",
+	"Golden hour",
+	"Sunset",
+	"Twilight",
+	"Neon night",
+	"Deep space",
+	"Aurora",
+	"Overcast",
+	"Storm",
+	"Blood moon",
+	"Void",
+	"Community 1",
+	"Community 2",
+	"Community 3 (red)",
+}
 
 function Env.skyTheme(name)
 	if name == "Game default" then
 		Env.resetSky()
 		return
 	end
+	Env.touched = true
+	local pack = SKY_PACKS[name]
+	if pack then
+		local faces = {}
+		for face, id in pairs(pack) do
+			faces["Skybox" .. face] = "rbxassetid://" .. id
+		end
+		Env.skyFaces = faces
+		Env.skyFacesForce = true
+		Env.skyProps = { StarCount = 0, CelestialBodiesShown = false }
+		Env.atmosProps = { Density = 0, Offset = 0, Color = C.white, Decay = C.white, Glare = 0, Haze = 0 }
+		Env.fx = nil
+		Env.syncAll()
+		return
+	end
 	local def = SKY_THEMES[name]
 	if not def then
 		return
 	end
-	Env.touched = true
+	Env.skyFaces = nil
+	Env.skyFacesForce = false
 	Env.skyProps = def.sky
 	Env.atmosProps = def.atmos
+	Env.fx = def.fx
 	Env.useDefaultSky()
+	if def.light then
+		Env.set(def.light, 1.6)
+	end
+	if def.clouds then
+		Env.cloudsTheme(def.clouds)
+	end
 	Env.syncAll()
 end
 
@@ -3408,6 +3546,9 @@ function Env.customSky(text)
 	Env.touched = true
 	Env.skyFaces = faces
 	Env.skyFacesForce = true
+	Env.skyProps = { StarCount = 0, CelestialBodiesShown = false }
+	Env.atmosProps = { Density = 0, Offset = 0, Color = C.white, Decay = C.white, Glare = 0, Haze = 0 }
+	Env.fx = nil
 	Env.syncAll()
 	return true
 end
@@ -3519,6 +3660,7 @@ function Env.timePreset(name)
 	Env.set(props, 1.6)
 	Env.skyProps = { StarCount = 3000, CelestialBodiesShown = true }
 	Env.atmosProps = p.atmos
+	Env.fx = nil
 	Env.useDefaultSky()
 	Env.syncAll()
 end
@@ -3533,7 +3675,7 @@ function Env.reset()
 		end)
 	end
 	Env.resetSky()
-	Env.syncGrade()
+	Env.syncAll()
 	if Env.cloudsCreated then
 		Env.cloudsCreated:Destroy()
 		Env.cloudsCreated = nil
@@ -3544,21 +3686,617 @@ function Env.reset()
 end
 onUnload(Env.reset)
 
--- ---- bridge for the quarantine engine above
--- It moves the game's own Sky / Atmosphere out of Lighting and keeps colour grading in
--- gradeStore as Enabled flags, so a reset has to give them back.
-function Env.syncGrade()
-	Env.syncAll()
+--========================================================================
+-- SETTINGS PAGE
+--========================================================================
+CONFIG.ShowLoader = not Cfg.readFlag("skiploader")
+
+local autoToggle
+
+local function doUnload()
+	toast("Unloading " .. CONFIG.Name, "Restoring your game...", 1.5)
+	setShown(false)
+	task.delay(0.7, function()
+		Unload()
+	end)
 end
 
 do
-	local rawResetSky = Env.resetSky
-	function Env.resetSky()
-		Env.release("Sky")
-		Env.release("Atmosphere")
-		rawResetSky()
+	local page = Tabs.Settings.Content
+
+	-- ---- performance: frame rate
+	local gFps = COMP.Group(page, "Frame rate")
+	COMP.Toggle(gFps, {
+		key = "perf.uncap",
+		text = "Uncap FPS",
+		desc = "Removes the frame rate limit",
+		default = false,
+		callback = function(on)
+			local quiet = Cfg.suppress
+			Perf.fps.uncap = on
+			task.spawn(function()
+				local method = Perf.applyFps()
+				if not method then
+					if not quiet then
+						toast("FPS unlock unavailable", "Your executor has no setfpscap or FFlag support.", 4)
+					end
+					return
+				end
+				if on and not quiet then
+					task.wait(0.8)
+					local fps = Perf.measure(1.2)
+					if fps > 75 then
+						toast("FPS unlocked", "Running at about " .. fps .. " FPS.")
+					else
+						toast("Cap applied, FPS still ~" .. fps, "VSync, your monitor or the game may be limiting it.", 4.5)
+					end
+				end
+			end)
+		end,
+	})
+	COMP.Slider(gFps, {
+		key = "perf.limit",
+		text = "FPS limit",
+		min = 30,
+		max = 360,
+		step = 10,
+		default = 60,
+		suffix = " fps",
+		callback = function(v)
+			Perf.fps.limit = v
+			if not Perf.fps.uncap then
+				Perf.applyFps()
+			end
+		end,
+	})
+	COMP.Toggle(gFps, {
+		key = "perf.hud",
+		text = "FPS and ping counter",
+		desc = "Small overlay in the top left",
+		default = false,
+		callback = function(on)
+			Hud.set(on)
+		end,
+	})
+
+	-- ---- performance: rendering
+	local gRender = COMP.Group(page, "Rendering")
+	local q = 10
+	pcall(function()
+		q = math.clamp(settings().Rendering.QualityLevel.Value, 1, 21)
+	end)
+	COMP.Slider(gRender, {
+		key = "perf.quality",
+		text = "Graphics quality",
+		min = 1,
+		max = 21,
+		step = 1,
+		default = q,
+		format = function(v)
+			return "Level " .. math.floor(v + 0.5)
+		end,
+		callback = function(v)
+			Perf.quality(v)
+		end,
+	})
+	COMP.Toggle(gRender, {
+		key = "perf.shadows",
+		text = "Disable shadows",
+		callback = function(on)
+			Perf.shadows(on)
+		end,
+	})
+	COMP.Toggle(gRender, {
+		key = "perf.postfx",
+		text = "Disable post-processing",
+		desc = "Bloom, blur, sun rays, depth of field",
+		callback = function(on)
+			Perf.postfx(on)
+		end,
+	})
+	COMP.Toggle(gRender, {
+		key = "perf.particles",
+		text = "Disable particles and effects",
+		desc = "Particles, trails, beams, fire, smoke",
+		callback = function(on)
+			Perf.world("particles", on)
+		end,
+	})
+	COMP.Toggle(gRender, {
+		noConfig = true,
+		text = "Disable 3D rendering",
+		desc = "Black world, big FPS boost while AFK",
+		callback = function(on)
+			Perf.render3d(on)
+		end,
+	})
+
+	-- ---- performance: world
+	local gWorld = COMP.Group(page, "World")
+	COMP.Toggle(gWorld, {
+		key = "perf.smooth",
+		text = "Smooth plastic materials",
+		desc = "Flattens every material for less GPU load",
+		callback = function(on)
+			Perf.world("smooth", on)
+		end,
+	})
+	COMP.Toggle(gWorld, {
+		key = "perf.textures",
+		text = "Hide textures and decals",
+		callback = function(on)
+			Perf.world("textures", on)
+		end,
+	})
+	COMP.Toggle(gWorld, {
+		key = "perf.terrain",
+		text = "Simplify terrain and water",
+		desc = "No grass decoration, flat water",
+		callback = function(on)
+			Perf.terrain(on)
+		end,
+	})
+	COMP.Button(gWorld, {
+		text = "Clear memory",
+		desc = "Runs a garbage collection pass",
+		buttonText = "Clear",
+		callback = function()
+			task.spawn(function()
+				local ok, before, after = pcall(Perf.clearMemory)
+				if ok then
+					toast("Memory cleared", string.format("%d MB -> %d MB", before, after))
+				else
+					toast("Couldn't clear memory", "Not supported here.")
+				end
+			end)
+		end,
+	})
+
+	-- ---- appearance
+	local gTheme = COMP.Group(page, "Appearance")
+	local accentPicker, swatches, rainbowToggle
+	local rainbowConn
+	local function setRainbow(on)
+		if rainbowConn then
+			rainbowConn:Disconnect()
+			rainbowConn = nil
+		end
+		Theme.values.rainbow = on
+		if on then
+			local acc = 0
+			rainbowConn = RunService.Heartbeat:Connect(function(dt)
+				acc += dt
+				if acc < 0.05 then
+					return
+				end
+				acc = 0
+				Theme.apply({ accent = Color3.fromHSV((os.clock() * 0.08) % 1, 0.55, 1), preset = "Custom" }, true)
+			end)
+		end
 	end
+	onUnload(function()
+		if rainbowConn then
+			rainbowConn:Disconnect()
+		end
+	end)
+
+	local items = {}
+	for _, p in ipairs(PRESETS) do
+		table.insert(items, { name = p.name, color1 = p.accent, color2 = p.panelBot })
+	end
+	swatches = COMP.Swatches(gTheme, {
+		key = "theme.preset",
+		text = "Theme",
+		items = items,
+		default = "Glass",
+		callback = function(name)
+			if rainbowToggle and rainbowToggle.Get() then
+				rainbowToggle.Set(false, true)
+				setRainbow(false)
+			end
+			Theme.setPreset(name)
+			if accentPicker then
+				accentPicker.Set(Theme.values.accent, true)
+			end
+		end,
+	})
+	accentPicker = COMP.ColorPicker(gTheme, {
+		key = "theme.accent",
+		skip = function()
+			return Theme.values.preset ~= "Custom"
+		end,
+		text = "Accent color",
+		default = Theme.values.accent,
+		callback = function(c)
+			if rainbowToggle and rainbowToggle.Get() then
+				rainbowToggle.Set(false, true)
+				setRainbow(false)
+			end
+			Theme.apply({ accent = c, preset = "Custom" })
+			swatches.Set(nil)
+		end,
+	})
+	rainbowToggle = COMP.Toggle(gTheme, {
+		key = "theme.rainbow",
+		text = "Rainbow accent",
+		desc = "Cycles the accent colour",
+		callback = setRainbow,
+	})
+	COMP.Slider(gTheme, {
+		key = "theme.opacity",
+		text = "Glass opacity",
+		min = 50,
+		max = 100,
+		step = 1,
+		default = math.floor((1 - Theme.values.alpha) * 100 + 0.5),
+		suffix = "%",
+		callback = function(v)
+			Theme.apply({ alpha = 1 - v / 100 })
+		end,
+	})
+
+	-- ---- effects
+	local gFx = COMP.Group(page, "Effects")
+	COMP.Toggle(gFx, {
+		key = "fx.snow",
+		text = "Snow",
+		desc = "Falling snow over the screen while the UI is open",
+		callback = function(on)
+			Snow.enabled = on
+			Snow.refresh()
+		end,
+	})
+	COMP.Slider(gFx, {
+		key = "fx.snowAmount",
+		text = "Snow amount",
+		min = 10,
+		max = 100,
+		step = 5,
+		default = 50,
+		suffix = "%",
+		callback = function(v)
+			Snow.amount = v / 100
+			Snow.build(math.floor(Snow.max * Snow.amount + 0.5))
+		end,
+	})
+	COMP.Slider(gFx, {
+		key = "fx.snowSpeed",
+		text = "Snow speed",
+		min = 0.3,
+		max = 3,
+		step = 0.1,
+		default = 1,
+		suffix = "x",
+		callback = function(v)
+			Snow.speed = v
+		end,
+	})
+
+	-- ---- interface
+	local gUi = COMP.Group(page, "Interface")
+	COMP.Keybind(gUi, {
+		key = "ui.key",
+		text = "Toggle key",
+		default = CONFIG.ToggleKey,
+		callback = function(key)
+			CONFIG.ToggleKey = key
+		end,
+	})
+	COMP.Slider(gUi, {
+		key = "ui.scale",
+		text = "UI scale",
+		min = 80,
+		max = 130,
+		step = 5,
+		default = 100,
+		suffix = "%",
+		callback = function(v)
+			setUiScale(v / 100)
+		end,
+	})
+
+	COMP.Toggle(gUi, {
+		key = "ui.skipLoader",
+		text = "Skip loading screen",
+		desc = "Opens straight to the bar when you execute",
+		default = not CONFIG.ShowLoader,
+		callback = function(on)
+			Cfg.writeFlag("skiploader", on)
+		end,
+	})
+
+	-- ---- config
+	local gCfg = COMP.Group(page, "Config")
+	local importInput
+	autoToggle = COMP.Toggle(gCfg, {
+		text = "Auto config",
+		desc = "Saves your settings and loads them every time you execute",
+		default = false,
+		callback = function(on)
+			if on and not Cfg.canFile() then
+				toast("Auto config unavailable", "Your executor can't read or write files.", 3.5)
+				autoToggle.Set(false, true)
+				return
+			end
+			Cfg.auto = on
+			Cfg.saveFile()
+			toast(on and "Auto config on" or "Auto config off", on and "Settings save automatically." or nil)
+		end,
+	})
+	COMP.Button(gCfg, {
+		text = "Copy config",
+		desc = "Copies a code with all your settings",
+		buttonText = "Copy",
+		callback = function()
+			local code = Cfg.encode()
+			if Cfg.copy(code) then
+				toast("Config copied", "Paste the code anywhere to share it.")
+			else
+				importInput.Box.Text = code
+				toast("Clipboard unavailable", "The code is in the box below, copy it from there.", 4)
+			end
+		end,
+	})
+	importInput = COMP.Input(gCfg, {
+		text = "Import config",
+		desc = "Paste a config code (starts with KW1:)",
+		placeholder = "KW1:...",
+		buttonText = "Import",
+		callback = function(text)
+			local data = Cfg.decode(text)
+			if not data then
+				toast("Invalid config code", "A config code starts with KW1:")
+				return
+			end
+			local n = Cfg.apply(data)
+			Cfg.dirty()
+			toast("Config imported", n .. " settings applied")
+		end,
+	})
+
+	-- ---- script
+	local gScript = COMP.Group(page, "Script")
+	local armed = false
+	COMP.Button(gScript, {
+		text = "Unload script",
+		desc = "Restores your game and removes the UI",
+		buttonText = "Unload",
+		style = "danger",
+		callback = function(btn)
+			if armed then
+				armed = false
+				doUnload()
+				return
+			end
+			armed = true
+			btn.SetText("Confirm")
+			task.delay(3, function()
+				if armed then
+					armed = false
+					btn.SetText("Unload")
+				end
+			end)
+		end,
+	})
 end
+
+--========================================================================
+-- ENVIRONMENT PAGE
+--========================================================================
+do
+	local page = Tabs.Environment.Content
+
+	local function clockText(v)
+		local h = math.floor(v)
+		local m = math.floor((v - h) * 60 + 0.5)
+		if m == 60 then
+			h += 1
+			m = 0
+		end
+		return string.format("%02d:%02d", h % 24, m)
+	end
+
+	-- ---- time of day
+	local gTime = COMP.Group(page, "Time of day")
+	Env.ui.time = COMP.Segmented(gTime, {
+		key = "env.preset",
+		noReset = true,
+		text = "Preset",
+		options = TIME_NAMES,
+		default = false,
+		callback = function(name)
+			local p = TIMES[name].light
+			Env.timePreset(name)
+			Env.ui.timeSlider.Set(p.ClockTime, true)
+			Env.ui.brightness.Set(p.Brightness, true)
+			Env.ui.exposure.Set(p.ExposureCompensation, true)
+			Env.ui.ambient.Set(p.OutdoorAmbient, true)
+		end,
+	})
+	Env.ui.timeSlider = COMP.Slider(gTime, {
+		key = "env.time",
+		noReset = true,
+		text = "Time",
+		min = 0,
+		max = 24,
+		step = 0.1,
+		default = Lighting.ClockTime % 24,
+		format = clockText,
+		callback = function(v)
+			Env.set({ ClockTime = v })
+			Env.useDefaultSky()
+			Env.syncAll()
+			Env.ui.time.Clear()
+		end,
+	})
+	COMP.Toggle(gTime, {
+		key = "env.lock",
+		noReset = true,
+		text = "Lock environment",
+		desc = "Keeps your settings when the game tries to change them",
+		default = true,
+		callback = function(on)
+			Env.lock = on
+		end,
+	})
+	COMP.Toggle(gTime, {
+		key = "env.override",
+		noReset = true,
+		text = "Override game visuals",
+		desc = "Presets replace the game's own skybox, atmosphere and color grading",
+		default = true,
+		callback = function(on)
+			Env.setOverride(on)
+		end,
+	})
+	COMP.Toggle(gTime, {
+		key = "env.domes",
+		noReset = true,
+		text = "Hide game sky domes",
+		desc = "Hides huge non-solid dome meshes some games use as a fake sky",
+		default = true,
+		callback = function(on)
+			Env.hideDomes = on
+			Env.syncAll()
+		end,
+	})
+
+	-- ---- sky
+	local gSky = COMP.Group(page, "Sky")
+	Env.ui.sky = COMP.Dropdown(gSky, {
+		key = "env.sky",
+		noReset = true,
+		text = "Sky theme",
+		options = SKY_NAMES,
+		default = "Game default",
+		callback = function(name)
+			Env.skyTheme(name)
+		end,
+	})
+	COMP.Input(gSky, {
+		text = "Custom skybox",
+		desc = "1 asset ID for all faces, or 6 (Bk Dn Ft Lf Rt Up)",
+		placeholder = "IDs separated by spaces or commas",
+		buttonText = "Apply",
+		callback = function(text)
+			if Env.customSky(text) then
+				toast("Skybox applied")
+			else
+				toast("Invalid IDs", "Paste 1 or 6 numeric asset IDs.")
+			end
+		end,
+	})
+	local cloudsNow = Env.getClouds(false)
+	COMP.Toggle(gSky, {
+		key = "env.clouds",
+		noReset = true,
+		text = "Clouds",
+		default = cloudsNow and cloudsNow.Enabled or false,
+		callback = function(on)
+			Env.clouds(on, nil)
+		end,
+	})
+	COMP.Slider(gSky, {
+		key = "env.cover",
+		noReset = true,
+		text = "Cloud cover",
+		min = 0,
+		max = 1,
+		step = 0.05,
+		default = cloudsNow and cloudsNow.Cover or 0.5,
+		callback = function(v)
+			Env.clouds(nil, v)
+		end,
+	})
+
+	-- ---- lighting
+	local gLight = COMP.Group(page, "Lighting")
+	Env.ui.brightness = COMP.Slider(gLight, {
+		key = "env.brightness",
+		noReset = true,
+		text = "Brightness",
+		min = 0,
+		max = 10,
+		step = 0.1,
+		default = math.clamp(Lighting.Brightness, 0, 10),
+		callback = function(v)
+			Env.set({ Brightness = v })
+		end,
+	})
+	Env.ui.exposure = COMP.Slider(gLight, {
+		key = "env.exposure",
+		noReset = true,
+		text = "Exposure",
+		min = -3,
+		max = 3,
+		step = 0.1,
+		default = math.clamp(Lighting.ExposureCompensation, -3, 3),
+		callback = function(v)
+			Env.set({ ExposureCompensation = v })
+		end,
+	})
+	Env.ui.ambient = COMP.ColorPicker(gLight, {
+		key = "env.ambient",
+		noReset = true,
+		text = "Ambient light",
+		default = Lighting.OutdoorAmbient,
+		callback = function(c)
+			Env.set({ Ambient = c, OutdoorAmbient = c })
+		end,
+	})
+	Env.ui.fog = COMP.Slider(gLight, {
+		key = "env.fog",
+		noReset = true,
+		text = "Fog distance",
+		min = 100,
+		max = 5000,
+		step = 50,
+		default = Lighting.FogEnd >= 5000 and 5000 or math.max(100, Lighting.FogEnd),
+		format = function(v)
+			if v >= 5000 then
+				return "Off"
+			end
+			return math.floor(v) .. " studs"
+		end,
+		callback = function(v)
+			if v >= 5000 then
+				Env.set({ FogEnd = 100000, FogStart = 0 })
+			else
+				Env.set({ FogEnd = v, FogStart = 0 })
+			end
+		end,
+	})
+	Env.ui.fogColor = COMP.ColorPicker(gLight, {
+		key = "env.fogColor",
+		noReset = true,
+		text = "Fog color",
+		default = Lighting.FogColor,
+		callback = function(c)
+			Env.set({ FogColor = c })
+		end,
+	})
+
+	-- ---- reset
+	local gReset = COMP.Group(page, "Reset")
+	COMP.Button(gReset, {
+		text = "Reset environment",
+		desc = "Puts lighting, sky and clouds back to the game's own",
+		buttonText = "Reset",
+		callback = function()
+			Env.reset()
+			Env.ui.time.Clear()
+			Env.ui.timeSlider.Set(Lighting.ClockTime % 24, true)
+			Env.ui.sky.Set("Game default", true)
+			Env.ui.brightness.Set(math.clamp(Lighting.Brightness, 0, 10), true)
+			Env.ui.exposure.Set(math.clamp(Lighting.ExposureCompensation, -3, 3), true)
+			Env.ui.ambient.Set(Lighting.OutdoorAmbient, true)
+			Env.ui.fog.Set(Lighting.FogEnd >= 5000 and 5000 or math.max(100, Lighting.FogEnd), true)
+			Env.ui.fogColor.Set(Lighting.FogColor, true)
+			toast("Environment reset")
+		end,
+	})
+end
+
 
 --========================================================================
 -- ESP  (engine + tab + live preview panel)
@@ -4696,15 +5434,48 @@ do
 		if Soru.onKey and input.KeyCode == Soru.currentKey() then
 			Soru.trigger()
 		end
-		if Soru.rspam and input.KeyCode == Enum.KeyCode.R and not Soru.rBusy then
-			Soru.rBusy = true
-			task.spawn(function()
-				while Soru.on and Soru.rspam and UserInputService:IsKeyDown(Enum.KeyCode.R) and not typing() do
-					tap(Enum.KeyCode.R)
-					task.wait(Soru.rgap / 1000)
+	end)
+
+	-- R spam: independent of the Soru macro. Hold detection uses the real key state when the
+	-- executor exposes it (iskeypressed), because our own key events would otherwise
+	-- "release" R. Every cycle ends with R down, matching the physical hold.
+	local function rDown()
+		if type(iskeypressed) == "function" then
+			local ok, v = pcall(iskeypressed, 0x52)
+			if ok then
+				if type(isrbxactive) == "function" then
+					local ok2, active = pcall(isrbxactive)
+					if ok2 and not active then
+						return false
+					end
 				end
-				Soru.rBusy = false
-			end)
+				return v == true
+			end
+		end
+		return UserInputService:IsKeyDown(Enum.KeyCode.R)
+	end
+
+	local function spamR()
+		if Soru.rBusy then
+			return
+		end
+		Soru.rBusy = true
+		task.spawn(function()
+			task.wait(math.max(Soru.rgap, 10) / 1000)
+			while Soru.rspam and rDown() and not typing() do
+				pcall(function()
+					VIM:SendKeyEvent(false, Enum.KeyCode.R, false, game)
+					VIM:SendKeyEvent(true, Enum.KeyCode.R, false, game)
+				end)
+				task.wait(math.max(Soru.rgap, 10) / 1000)
+			end
+			Soru.rBusy = false
+		end)
+	end
+
+	bindConn(UserInputService.InputBegan, function(input)
+		if input.KeyCode == Enum.KeyCode.R and Soru.rspam and not Soru.rBusy and not typing() then
+			spamR()
 		end
 	end)
 end
@@ -4819,7 +5590,7 @@ do
 	COMP.Toggle(gR, {
 		key = "macros.soru.rspam",
 		text = "R spam",
-		desc = "Spams R while you hold it (needs the Soru macro on)",
+		desc = "Spams R while you hold it. Works without the Soru macro",
 		default = false,
 		callback = function(on)
 			Soru.rspam = on
@@ -4840,602 +5611,833 @@ do
 end
 
 --========================================================================
--- SETTINGS PAGE
+-- MOVEMENT  (Sang Z tap launch + Diamond click boost, from Taco Shop v5)
 --========================================================================
-local autoToggle
-
-local function doUnload()
-	toast("Unloading " .. CONFIG.Name, "Restoring your game...", 1.5)
-	setShown(false)
-	task.delay(0.7, function()
-		Unload()
-	end)
-end
+local Move = {
+	sang = { on = false, key = Enum.KeyCode.Z, toggleKey = Enum.KeyCode.V, min = 600, max = 800, lift = 0.2, cooldown = 8.5, duration = 0.5, style = true, last = 0 },
+	diamond = { on = false, toggleKey = Enum.KeyCode.B, power = 350, cooldown = 3.5, duration = 0.5, style = true, last = 0 },
+}
 
 do
-	local page = Tabs.Settings.Content
+	local params = RaycastParams.new()
+	params.FilterType = Enum.RaycastFilterType.Exclude
+	local active
 
-	-- ---- performance: frame rate
-	local gFps = COMP.Group(page, "Frame rate")
-	COMP.Toggle(gFps, {
-		key = "perf.uncap",
-		text = "Uncap FPS",
-		desc = "Removes the frame rate limit",
-		default = false,
-		callback = function(on)
-			local quiet = Cfg.suppress
-			Perf.fps.uncap = on
-			task.spawn(function()
-				local method = Perf.applyFps()
-				if not method then
-					if not quiet then
-						toast("FPS unlock unavailable", "Your executor has no setfpscap or FFlag support.", 4)
-					end
-					return
-				end
-				if on and not quiet then
-					task.wait(0.8)
-					local fps = Perf.measure(1.2)
-					if fps > 75 then
-						toast("FPS unlocked", "Running at about " .. fps .. " FPS.")
-					else
-						toast("Cap applied, FPS still ~" .. fps, "VSync, your monitor or the game may be limiting it.", 4.5)
-					end
-				end
-			end)
-		end,
-	})
-	COMP.Slider(gFps, {
-		key = "perf.limit",
-		text = "FPS limit",
-		min = 30,
-		max = 360,
-		step = 10,
-		default = 60,
-		suffix = " fps",
-		callback = function(v)
-			Perf.fps.limit = v
-			if not Perf.fps.uncap then
-				Perf.applyFps()
+	local function typing()
+		return UserInputService:GetFocusedTextBox() ~= nil
+	end
+
+	-- style detection: equipped tool name, attributes, or style text in the game UI
+	local function hasStyle(word, uiWord)
+		local char = LocalPlayer.Character
+		if not char then
+			return false
+		end
+		local function check(inst)
+			if string.find(string.lower(inst.Name), word, 1, true) then
+				return true
 			end
-		end,
-	})
-	COMP.Toggle(gFps, {
-		key = "perf.hud",
-		text = "FPS and ping counter",
-		desc = "Small overlay in the top left",
-		default = false,
-		callback = function(on)
-			Hud.set(on)
-		end,
-	})
-
-	-- ---- performance: rendering
-	local gRender = COMP.Group(page, "Rendering")
-	local q = 10
-	pcall(function()
-		q = math.clamp(settings().Rendering.QualityLevel.Value, 1, 21)
-	end)
-	COMP.Slider(gRender, {
-		key = "perf.quality",
-		text = "Graphics quality",
-		min = 1,
-		max = 21,
-		step = 1,
-		default = q,
-		format = function(v)
-			return "Level " .. math.floor(v + 0.5)
-		end,
-		callback = function(v)
-			Perf.quality(v)
-		end,
-	})
-	COMP.Toggle(gRender, {
-		key = "perf.shadows",
-		text = "Disable shadows",
-		callback = function(on)
-			Perf.shadows(on)
-		end,
-	})
-	COMP.Toggle(gRender, {
-		key = "perf.postfx",
-		text = "Disable post-processing",
-		desc = "Bloom, blur, sun rays, depth of field",
-		callback = function(on)
-			Perf.postfx(on)
-		end,
-	})
-	COMP.Toggle(gRender, {
-		key = "perf.particles",
-		text = "Disable particles and effects",
-		desc = "Particles, trails, beams, fire, smoke",
-		callback = function(on)
-			Perf.world("particles", on)
-		end,
-	})
-	COMP.Toggle(gRender, {
-		noConfig = true,
-		text = "Disable 3D rendering",
-		desc = "Black world, big FPS boost while AFK",
-		callback = function(on)
-			Perf.render3d(on)
-		end,
-	})
-
-	-- ---- performance: world
-	local gWorld = COMP.Group(page, "World")
-	COMP.Toggle(gWorld, {
-		key = "perf.smooth",
-		text = "Smooth plastic materials",
-		desc = "Flattens every material for less GPU load",
-		callback = function(on)
-			Perf.world("smooth", on)
-		end,
-	})
-	COMP.Toggle(gWorld, {
-		key = "perf.textures",
-		text = "Hide textures and decals",
-		callback = function(on)
-			Perf.world("textures", on)
-		end,
-	})
-	COMP.Toggle(gWorld, {
-		key = "perf.terrain",
-		text = "Simplify terrain and water",
-		desc = "No grass decoration, flat water",
-		callback = function(on)
-			Perf.terrain(on)
-		end,
-	})
-	COMP.Button(gWorld, {
-		text = "Clear memory",
-		desc = "Runs a garbage collection pass",
-		buttonText = "Clear",
-		callback = function()
-			task.spawn(function()
-				local ok, before, after = pcall(Perf.clearMemory)
-				if ok then
-					toast("Memory cleared", string.format("%d MB -> %d MB", before, after))
-				else
-					toast("Couldn't clear memory", "Not supported here.")
+			for _, v in pairs(inst:GetAttributes()) do
+				if type(v) == "string" and string.find(string.lower(v), word, 1, true) then
+					return true
 				end
-			end)
-		end,
-	})
-
-	-- ---- appearance
-	local gTheme = COMP.Group(page, "Appearance")
-	local accentPicker, swatches, rainbowToggle
-	local rainbowConn
-	local function setRainbow(on)
-		if rainbowConn then
-			rainbowConn:Disconnect()
-			rainbowConn = nil
+			end
+			return false
 		end
-		Theme.values.rainbow = on
-		if on then
-			local acc = 0
-			rainbowConn = RunService.Heartbeat:Connect(function(dt)
-				acc += dt
-				if acc < 0.05 then
-					return
+		local tool = char:FindFirstChildOfClass("Tool")
+		if (tool and check(tool)) or check(char) then
+			return true
+		end
+		local pg = LocalPlayer:FindFirstChild("PlayerGui")
+		if pg then
+			for _, d in ipairs(pg:GetDescendants()) do
+				if d:IsA("TextLabel") and d.Visible and string.find(string.lower(d.Text), uiWord, 1, true) then
+					return true
 				end
-				acc = 0
-				Theme.apply({ accent = Color3.fromHSV((os.clock() * 0.08) % 1, 0.55, 1), preset = "Custom" }, true)
-			end)
+			end
 		end
+		return false
+	end
+
+	local function lookDir(lift)
+		local cam = Workspace.CurrentCamera
+		if not cam then
+			return nil
+		end
+		return (cam.CFrame.LookVector + Vector3.new(0, lift, 0)).Unit
+	end
+
+	-- velocity launch: full speed, brake over the last 30%, 10% carried out, stops at walls
+	local function launch(dir, power, duration)
+		local char = LocalPlayer.Character
+		local root = char and char:FindFirstChild("HumanoidRootPart")
+		local hum = char and char:FindFirstChildOfClass("Humanoid")
+		if not (root and hum and hum.Health > 0) then
+			return false
+		end
+		if active then
+			active.conn:Disconnect()
+			active = nil
+		end
+		params.FilterDescendantsInstances = { char }
+		local t0 = os.clock()
+		local me = {}
+		local function stop()
+			me.conn:Disconnect()
+			if active == me then
+				active = nil
+			end
+		end
+		me.conn = RunService.Heartbeat:Connect(function(dt)
+			local t = (os.clock() - t0) / duration
+			local blocked = hum.Health <= 0
+				or hum.Sit
+				or char:GetAttribute("Ragdoll") == true
+				or hum:GetState() == Enum.HumanoidStateType.Ragdoll
+			if blocked or not root.Parent then
+				stop()
+				return
+			end
+			if t >= 1 then
+				root.AssemblyLinearVelocity = dir * power * 0.1
+				stop()
+				return
+			end
+			local speed = power
+			if t > 0.7 then
+				speed = power * (1 - 0.9 * ((t - 0.7) / 0.3))
+			end
+			local hit = Workspace:Blockcast(CFrame.new(root.Position), Vector3.new(2, 4, 2), dir * (speed * dt + 2), params)
+			if hit then
+				root.AssemblyLinearVelocity = Vector3.zero
+				stop()
+				return
+			end
+			root.AssemblyLinearVelocity = dir * speed
+		end)
+		active = me
+		return true
 	end
 	onUnload(function()
-		if rainbowConn then
-			rainbowConn:Disconnect()
+		if active then
+			active.conn:Disconnect()
+			active = nil
 		end
 	end)
 
-	local items = {}
-	for _, p in ipairs(PRESETS) do
-		table.insert(items, { name = p.name, color1 = p.accent, color2 = p.panelBot })
+	function Move.sangFire()
+		local s = Move.sang
+		if not s.on or os.clock() - s.last < s.cooldown then
+			return
+		end
+		if s.style and not hasStyle("sanguine", "bloodbane") then
+			return
+		end
+		local lo, hi = math.min(s.min, s.max), math.max(s.min, s.max)
+		local dir = lookDir(s.lift)
+		if dir and launch(dir, lo + math.random() * (hi - lo), s.duration) then
+			s.last = os.clock()
+		end
 	end
-	swatches = COMP.Swatches(gTheme, {
-		key = "theme.preset",
-		text = "Theme",
-		items = items,
-		default = "Glass",
-		callback = function(name)
-			if rainbowToggle and rainbowToggle.Get() then
-				rainbowToggle.Set(false, true)
-				setRainbow(false)
-			end
-			Theme.setPreset(name)
-			if accentPicker then
-				accentPicker.Set(Theme.values.accent, true)
-			end
-		end,
-	})
-	accentPicker = COMP.ColorPicker(gTheme, {
-		key = "theme.accent",
-		skip = function()
-			return Theme.values.preset ~= "Custom"
-		end,
-		text = "Accent color",
-		default = Theme.values.accent,
-		callback = function(c)
-			if rainbowToggle and rainbowToggle.Get() then
-				rainbowToggle.Set(false, true)
-				setRainbow(false)
-			end
-			Theme.apply({ accent = c, preset = "Custom" })
-			swatches.Set(nil)
-		end,
-	})
-	rainbowToggle = COMP.Toggle(gTheme, {
-		key = "theme.rainbow",
-		text = "Rainbow accent",
-		desc = "Cycles the accent colour",
-		callback = setRainbow,
-	})
-	COMP.Slider(gTheme, {
-		key = "theme.opacity",
-		text = "Glass opacity",
-		min = 50,
-		max = 100,
-		step = 1,
-		default = math.floor((1 - Theme.values.alpha) * 100 + 0.5),
-		suffix = "%",
-		callback = function(v)
-			Theme.apply({ alpha = 1 - v / 100 })
-		end,
-	})
 
-	-- ---- effects
-	local gFx = COMP.Group(page, "Effects")
-	COMP.Toggle(gFx, {
-		key = "fx.snow",
-		text = "Snow",
-		desc = "Falling snow over the screen while the UI is open",
-		callback = function(on)
-			Snow.enabled = on
-			Snow.refresh()
-		end,
-	})
-	COMP.Slider(gFx, {
-		key = "fx.snowAmount",
-		text = "Snow amount",
-		min = 10,
-		max = 100,
-		step = 5,
-		default = 50,
-		suffix = "%",
-		callback = function(v)
-			Snow.amount = v / 100
-			Snow.build(math.floor(Snow.max * Snow.amount + 0.5))
-		end,
-	})
-	COMP.Slider(gFx, {
-		key = "fx.snowSpeed",
-		text = "Snow speed",
-		min = 0.3,
-		max = 3,
-		step = 0.1,
-		default = 1,
-		suffix = "x",
-		callback = function(v)
-			Snow.speed = v
-		end,
-	})
+	function Move.diamondFire()
+		local d = Move.diamond
+		if not d.on or os.clock() - d.last < d.cooldown then
+			return
+		end
+		if d.style and not hasStyle("diamond", "diamond") then
+			return
+		end
+		local dir = lookDir(0)
+		if dir and launch(dir, d.power, d.duration) then
+			d.last = os.clock()
+		end
+	end
 
-	-- ---- interface
-	local gUi = COMP.Group(page, "Interface")
-	COMP.Keybind(gUi, {
-		key = "ui.key",
-		text = "Toggle key",
-		default = CONFIG.ToggleKey,
-		callback = function(key)
-			CONFIG.ToggleKey = key
-		end,
-	})
-	COMP.Slider(gUi, {
-		key = "ui.scale",
-		text = "UI scale",
-		min = 80,
-		max = 130,
-		step = 5,
-		default = 100,
-		suffix = "%",
-		callback = function(v)
-			setUiScale(v / 100)
-		end,
-	})
+	bindConn(UserInputService.InputBegan, function(input, gp)
+		if typing() then
+			return
+		end
+		local t = input.UserInputType
+		if t == Enum.UserInputType.Keyboard then
+			if input.KeyCode == Move.sang.key then
+				Move.sangFire()
+			end
+			if input.KeyCode == Move.sang.toggleKey and Move.sangToggle then
+				Move.sangToggle.Set(not Move.sangToggle.Get())
+			end
+			if input.KeyCode == Move.diamond.toggleKey and Move.diamondToggle then
+				Move.diamondToggle.Set(not Move.diamondToggle.Get())
+			end
+		elseif t == Enum.UserInputType.MouseButton1 and not gp then
+			Move.diamondFire()
+		end
+	end)
+end
 
-	-- ---- config
-	local gCfg = COMP.Group(page, "Config")
-	local importInput
-	autoToggle = COMP.Toggle(gCfg, {
-		text = "Auto config",
-		desc = "Saves your settings and loads them every time you execute",
+do
+	local page = Tabs.Movement.Content
+	local s, d = Move.sang, Move.diamond
+
+	local gS = COMP.Group(page, "Sang Z boost")
+	Move.sangToggle = COMP.Toggle(gS, {
+		key = "move.sang.on",
+		text = "Sang Z boost",
+		desc = "Tap the boost key to launch where you're looking",
 		default = false,
 		callback = function(on)
-			if on and not Cfg.canFile() then
-				toast("Auto config unavailable", "Your executor can't read or write files.", 3.5)
-				autoToggle.Set(false, true)
-				return
-			end
-			Cfg.auto = on
-			Cfg.saveFile()
-			toast(on and "Auto config on" or "Auto config off", on and "Settings save automatically." or nil)
+			s.on = on
 		end,
 	})
-	COMP.Button(gCfg, {
-		text = "Copy config",
-		desc = "Copies a code with all your settings",
-		buttonText = "Copy",
-		callback = function()
-			local code = Cfg.encode()
-			if Cfg.copy(code) then
-				toast("Config copied", "Paste the code anywhere to share it.")
-			else
-				importInput.Box.Text = code
-				toast("Clipboard unavailable", "The code is in the box below, copy it from there.", 4)
-			end
+	COMP.Keybind(gS, {
+		key = "move.sang.key",
+		text = "Boost key",
+		default = s.key,
+		callback = function(k)
+			s.key = k
 		end,
 	})
-	importInput = COMP.Input(gCfg, {
-		text = "Import config",
-		desc = "Paste a config code (starts with KW1:)",
-		placeholder = "KW1:...",
-		buttonText = "Import",
-		callback = function(text)
-			local data = Cfg.decode(text)
-			if not data then
-				toast("Invalid config code", "A config code starts with KW1:")
-				return
-			end
-			local n = Cfg.apply(data)
-			Cfg.dirty()
-			toast("Config imported", n .. " settings applied")
+	COMP.Keybind(gS, {
+		key = "move.sang.toggle",
+		text = "Toggle key",
+		default = s.toggleKey,
+		callback = function(k)
+			s.toggleKey = k
+		end,
+	})
+	COMP.Slider(gS, {
+		key = "move.sang.min",
+		text = "Min power",
+		min = 150,
+		max = 1200,
+		step = 10,
+		default = s.min,
+		callback = function(v)
+			s.min = v
+		end,
+	})
+	COMP.Slider(gS, {
+		key = "move.sang.max",
+		text = "Max power",
+		min = 150,
+		max = 1200,
+		step = 10,
+		default = s.max,
+		callback = function(v)
+			s.max = v
+		end,
+	})
+	COMP.Slider(gS, {
+		key = "move.sang.lift",
+		text = "Upward lift",
+		min = 0,
+		max = 50,
+		step = 1,
+		default = s.lift * 100,
+		suffix = "%",
+		callback = function(v)
+			s.lift = v / 100
+		end,
+	})
+	COMP.Slider(gS, {
+		key = "move.sang.cd",
+		text = "Cooldown",
+		min = 0,
+		max = 15,
+		step = 0.5,
+		default = s.cooldown,
+		suffix = " s",
+		callback = function(v)
+			s.cooldown = v
+		end,
+	})
+	COMP.Toggle(gS, {
+		key = "move.sang.style",
+		text = "Only with Sanguine equipped",
+		desc = "Turn this off if the boost never triggers",
+		default = true,
+		callback = function(on)
+			s.style = on
 		end,
 	})
 
-	-- ---- script
-	local gScript = COMP.Group(page, "Script")
-	local armed = false
-	COMP.Button(gScript, {
-		text = "Unload script",
-		desc = "Restores your game and removes the UI",
-		buttonText = "Unload",
-		style = "danger",
-		callback = function(btn)
-			if armed then
-				armed = false
-				doUnload()
-				return
-			end
-			armed = true
-			btn.SetText("Confirm")
-			task.delay(3, function()
-				if armed then
-					armed = false
-					btn.SetText("Unload")
-				end
-			end)
+	local gD = COMP.Group(page, "Diamond click boost")
+	Move.diamondToggle = COMP.Toggle(gD, {
+		key = "move.diamond.on",
+		text = "Diamond click boost",
+		desc = "Left click launches where you're looking",
+		default = false,
+		callback = function(on)
+			d.on = on
+		end,
+	})
+	COMP.Keybind(gD, {
+		key = "move.diamond.toggle",
+		text = "Toggle key",
+		default = d.toggleKey,
+		callback = function(k)
+			d.toggleKey = k
+		end,
+	})
+	COMP.Slider(gD, {
+		key = "move.diamond.power",
+		text = "Strength",
+		min = 150,
+		max = 500,
+		step = 10,
+		default = d.power,
+		callback = function(v)
+			d.power = v
+		end,
+	})
+	COMP.Slider(gD, {
+		key = "move.diamond.cd",
+		text = "Cooldown",
+		min = 0,
+		max = 10,
+		step = 0.5,
+		default = d.cooldown,
+		suffix = " s",
+		callback = function(v)
+			d.cooldown = v
+		end,
+	})
+	COMP.Toggle(gD, {
+		key = "move.diamond.style",
+		text = "Only with Diamond equipped",
+		desc = "Turn this off if the boost never triggers",
+		default = true,
+		callback = function(on)
+			d.style = on
 		end,
 	})
 end
 
 --========================================================================
--- ENVIRONMENT PAGE
+-- ACCESS  (Aim tab gate + Owner tab)
+-- NOTE: a gate inside a client script is only a UI lock. Anyone who can read the
+-- script can remove it. Real protection needs the aim code itself to be served
+-- by the backend after approval.
 --========================================================================
-do
-	local page = Tabs.Environment.Content
+local Access = {
+	status = "checking",
+	expires = nil,
+	err = nil,
+	listeners = {},
+	ownerKey = Cfg.readText("ownerkey") or "",
+}
 
-	local function clockText(v)
-		local h = math.floor(v)
-		local m = math.floor((v - h) * 60 + 0.5)
-		if m == 60 then
-			h += 1
-			m = 0
+local function httpReq(method, path, body, key)
+	if ACCESS.Api == "" then
+		return nil, "offline"
+	end
+	local fn = (syn and syn.request) or request or http_request or (http and http.request)
+	if type(fn) ~= "function" then
+		return nil, "executor has no http function"
+	end
+	local HttpService = game:GetService("HttpService")
+	local headers = { ["Content-Type"] = "application/json" }
+	if key and key ~= "" then
+		headers["x-owner-key"] = key
+	end
+	local ok, res = pcall(fn, {
+		Url = ACCESS.Api .. path,
+		Method = method,
+		Headers = headers,
+		Body = body and HttpService:JSONEncode(body) or nil,
+	})
+	if not ok or type(res) ~= "table" then
+		return nil, "request failed"
+	end
+	if res.StatusCode ~= 200 then
+		return nil, "HTTP " .. tostring(res.StatusCode)
+	end
+	local ok2, data = pcall(function()
+		return HttpService:JSONDecode(res.Body)
+	end)
+	if not ok2 then
+		return nil, "bad response"
+	end
+	return data
+end
+
+local function timeLeft(expires)
+	if not expires then
+		return "permanent"
+	end
+	local s = expires - os.time()
+	if s <= 0 then
+		return "expired"
+	end
+	local dd = math.floor(s / 86400)
+	local h = math.floor((s % 86400) / 3600)
+	local m = math.floor((s % 3600) / 60)
+	if dd > 0 then
+		return dd .. "d " .. h .. "h left"
+	end
+	if h > 0 then
+		return h .. "h " .. m .. "m left"
+	end
+	return m .. "m left"
+end
+
+function Access.has()
+	return Access.status == "owner" or Access.status == "granted"
+end
+
+function Access.fire()
+	for _, fn in ipairs(Access.listeners) do
+		pcall(fn)
+	end
+end
+
+function Access.refresh()
+	if IS_OWNER then
+		Access.status = "owner"
+		Access.fire()
+		return
+	end
+	if ACCESS.Api == "" then
+		Access.status = "offline"
+		Access.fire()
+		return
+	end
+	local data, err = httpReq("GET", "/access/" .. LocalPlayer.UserId)
+	if not data then
+		Access.status, Access.err = "error", err
+	elseif data.granted and (not data.expires or data.expires > os.time()) then
+		Access.status, Access.expires = "granted", data.expires
+	elseif data.granted then
+		Access.status = "expired"
+	elseif data.pending then
+		Access.status = "pending"
+	elseif data.denied then
+		Access.status = "denied"
+	else
+		Access.status = "none"
+	end
+	Access.fire()
+end
+
+function Access.request()
+	if ACCESS.Api == "" then
+		return false, "The access server isn't set up yet."
+	end
+	local data, err = httpReq("POST", "/request", {
+		userId = LocalPlayer.UserId,
+		username = LocalPlayer.Name,
+		displayName = LocalPlayer.DisplayName,
+		accountAge = LocalPlayer.AccountAge,
+	})
+	if not data then
+		return false, "Couldn't send the request (" .. tostring(err) .. ")."
+	end
+	Access.status = "pending"
+	Access.fire()
+	return true
+end
+
+local function loadThumb(img, userId)
+	task.spawn(function()
+		local ok, url = pcall(function()
+			return (Players:GetUserThumbnailAsync(userId, Enum.ThumbnailType.HeadShot, Enum.ThumbnailSize.Size100x100))
+		end)
+		if ok and url and img.Parent then
+			img.Image = url
 		end
-		return string.format("%02d:%02d", h % 24, m)
+	end)
+end
+
+local function clearGroup(g)
+	for _, r in ipairs(g.rows) do
+		r.frame:Destroy()
+	end
+	g.rows = {}
+end
+
+-- ---------------------------------------------------------------- Aim tab
+do
+	local page = Tabs.Aim.Content
+
+	local gLock = COMP.Group(page, "Restricted access")
+	local lockRow = newRow(gLock, 176)
+	local lockIcon = buildIcon("lock", 34, lockRow, C.iconDim)
+	lockIcon.holder.Position = UDim2.fromOffset(40, 44)
+	label({
+		Text = "Aim is restricted",
+		Position = UDim2.fromOffset(74, 22),
+		Size = UDim2.new(1, -90, 0, 22),
+		Font = Enum.Font.GothamSemibold,
+		TextSize = 16,
+	}, lockRow)
+	label({
+		Text = "Only approved users can use Aim. Request access and an owner will review it. Requesting sends your Roblox username and user ID to the owners.",
+		Position = UDim2.fromOffset(74, 48),
+		Size = UDim2.new(1, -90, 0, 44),
+		TextWrapped = true,
+		TextYAlignment = Enum.TextYAlignment.Top,
+		TextSize = 13,
+		TextColor3 = C.sub,
+	}, lockRow)
+	local statusL = label({
+		Position = UDim2.fromOffset(74, 100),
+		Size = UDim2.new(1, -90, 0, 18),
+		TextSize = 13,
+		Font = Enum.Font.GothamSemibold,
+	}, lockRow)
+	local reqBtn = makeButton(lockRow, "Request access", "primary", 150, 34, { Position = UDim2.fromOffset(74, 128) })
+	local chkBtn = makeButton(lockRow, "Check status", "ghost", 120, 34, { Position = UDim2.fromOffset(232, 128) })
+
+	local gOpen = COMP.Group(page, "Aim")
+	local openRow = newRow(gOpen, 56)
+	rowLabel(openRow, "Access", "Aim features will appear here", 0.6)
+	local openL = label({
+		AnchorPoint = Vector2.new(1, 0.5),
+		Position = UDim2.new(1, -16, 0.5, 0),
+		Size = UDim2.fromOffset(200, 18),
+		TextXAlignment = Enum.TextXAlignment.Right,
+		TextSize = 13,
+		TextColor3 = C.sub,
+	}, openRow)
+
+	local function render()
+		local has = Access.has()
+		gLock.box.Parent.Visible = not has
+		gOpen.box.Parent.Visible = has
+		local st = Access.status
+		local text = ({
+			checking = "Checking...",
+			offline = "Access server isn't set up yet",
+			none = "Not requested",
+			pending = "Request pending",
+			denied = "Request denied",
+			expired = "Access expired",
+		})[st]
+		if st == "error" then
+			text = "Couldn't reach the server (" .. tostring(Access.err) .. ")"
+		end
+		statusL.Text = "Status: " .. (text or st)
+		if st == "owner" then
+			openL.Text = "Owner"
+		elseif st == "granted" then
+			openL.Text = "Granted, " .. timeLeft(Access.expires)
+		end
+		reqBtn.Button.Visible = st == "none" or st == "denied" or st == "expired" or st == "error" or st == "offline"
+	end
+	table.insert(Access.listeners, render)
+	render()
+
+	reqBtn.Button.MouseButton1Click:Connect(function()
+		task.spawn(function()
+			local ok, msg = Access.request()
+			if ok then
+				toast("Request sent", "An owner will review it.")
+			else
+				toast("Request failed", msg, 4)
+			end
+		end)
+	end)
+	chkBtn.Button.MouseButton1Click:Connect(function()
+		task.spawn(function()
+			Access.refresh()
+			toast("Status updated", statusL.Text)
+		end)
+	end)
+
+	task.spawn(function()
+		Access.refresh()
+		while not unloaded do
+			task.wait(60)
+			if not unloaded then
+				Access.refresh()
+			end
+		end
+	end)
+end
+
+-- -------------------------------------------------------------- Owner tab
+if IS_OWNER then
+	local page = Tabs.Owner.Content
+	local DURATIONS = {
+		{ "1 day", 86400 },
+		{ "3 days", 259200 },
+		{ "7 days", 604800 },
+		{ "30 days", 2592000 },
+		{ "Permanent", nil },
+	}
+	local DUR_NAMES = {}
+	for _, dur in ipairs(DURATIONS) do
+		table.insert(DUR_NAMES, dur[1])
 	end
 
-	-- ---- time of day
-	local gTime = COMP.Group(page, "Time of day")
-	Env.ui.time = COMP.Segmented(gTime, {
-		key = "env.preset",
-		noReset = true,
-		text = "Preset",
-		options = TIME_NAMES,
-		default = false,
-		callback = function(name)
-			local p = TIMES[name].light
-			Env.timePreset(name)
-			Env.ui.timeSlider.Set(p.ClockTime, true)
-			Env.ui.brightness.Set(p.Brightness, true)
-			Env.ui.exposure.Set(p.ExposureCompensation, true)
-			Env.ui.ambient.Set(p.OutdoorAmbient, true)
-		end,
-	})
-	Env.ui.timeSlider = COMP.Slider(gTime, {
-		key = "env.time",
-		noReset = true,
-		text = "Time",
-		min = 0,
-		max = 24,
-		step = 0.1,
-		default = Lighting.ClockTime % 24,
-		format = clockText,
-		callback = function(v)
-			Env.set({ ClockTime = v })
-			Env.useDefaultSky()
-			Env.syncAll()
-			Env.ui.time.Clear()
-		end,
-	})
-	COMP.Toggle(gTime, {
-		key = "env.lock",
-		noReset = true,
-		text = "Lock environment",
-		desc = "Keeps your settings when the game tries to change them",
-		default = true,
-		callback = function(on)
-			Env.lock = on
-		end,
-	})
-	COMP.Toggle(gTime, {
-		key = "env.override",
-		noReset = true,
-		text = "Override game visuals",
-		desc = "Presets replace the game's own skybox, atmosphere and color grading",
-		default = true,
-		callback = function(on)
-			Env.setOverride(on)
-		end,
-	})
+	local function infoRow(g, name)
+		local r = newRow(g, 48)
+		rowLabel(r, name, nil, 0.4)
+		local v = label({
+			AnchorPoint = Vector2.new(1, 0.5),
+			Position = UDim2.new(1, -16, 0.5, 0),
+			Size = UDim2.new(0.55, 0, 0, 18),
+			TextXAlignment = Enum.TextXAlignment.Right,
+			TextColor3 = C.sub,
+			TextSize = 13,
+			TextTruncate = Enum.TextTruncate.AtEnd,
+		}, r)
+		return function(text)
+			v.Text = tostring(text)
+		end
+	end
 
-	-- ---- sky
-	local gSky = COMP.Group(page, "Sky")
-	Env.ui.sky = COMP.Dropdown(gSky, {
-		key = "env.sky",
-		noReset = true,
-		text = "Sky theme",
-		options = SKY_NAMES,
-		default = "Game default",
-		callback = function(name)
-			Env.skyTheme(name)
-		end,
-	})
-	COMP.Input(gSky, {
-		text = "Custom skybox",
-		desc = "1 asset ID for all faces, or 6 (Bk Dn Ft Lf Rt Up)",
-		placeholder = "IDs separated by spaces or commas",
-		buttonText = "Apply",
+	local gOv = COMP.Group(page, "Ownership")
+	local setWho = infoRow(gOv, "Signed in as")
+	local setApi = infoRow(gOv, "Access server")
+	local setPending = infoRow(gOv, "Pending requests")
+	local setGrantCount = infoRow(gOv, "Active access")
+	setWho(LocalPlayer.DisplayName .. " (@" .. LocalPlayer.Name .. ")")
+	setApi(ACCESS.Api == "" and "Not set up" or ACCESS.Api)
+	setPending("-")
+	setGrantCount("-")
+
+	local gReq = COMP.Group(page, "Access requests")
+	local gAct = COMP.Group(page, "Active access")
+	local ownerRefresh
+
+	local function ownerCall(path, body, okText)
+		task.spawn(function()
+			local data, err = httpReq("POST", path, body, Access.ownerKey)
+			if data then
+				toast(okText)
+				ownerRefresh()
+			else
+				toast("Action failed", tostring(err), 4)
+			end
+		end)
+	end
+
+	local function emptyRow(g, text)
+		local r = newRow(g, 52)
+		label({
+			Text = text,
+			Position = UDim2.fromOffset(16, 0),
+			Size = UDim2.new(1, -32, 1, 0),
+			TextColor3 = C.sub,
+			TextSize = 13,
+		}, r)
+	end
+
+	local function avatarOf(r, userId)
+		local av = frame({
+			Position = UDim2.fromOffset(16, 14),
+			Size = UDim2.fromOffset(46, 46),
+			BackgroundColor3 = rgb(36, 37, 40),
+		}, r)
+		corner(av, 23)
+		local img = new("ImageLabel", {
+			BackgroundTransparency = 1,
+			BorderSizePixel = 0,
+			Size = UDim2.fromScale(1, 1),
+			Image = "",
+		}, av)
+		corner(img, 23)
+		loadThumb(img, userId)
+	end
+
+	local function requestCard(req)
+		local r = newRow(gReq, 120)
+		avatarOf(r, req.userId)
+		label({
+			Text = tostring(req.displayName or req.username),
+			Position = UDim2.fromOffset(74, 14),
+			Size = UDim2.new(1, -90, 0, 20),
+			Font = Enum.Font.GothamSemibold,
+			TextTruncate = Enum.TextTruncate.AtEnd,
+		}, r)
+		local sub = label({
+			Text = "@" .. tostring(req.username) .. "   ID " .. tostring(req.userId) .. "   " .. tostring(req.accountAge or "?") .. " days old",
+			Position = UDim2.fromOffset(74, 36),
+			Size = UDim2.new(1, -90, 0, 16),
+			TextSize = 12,
+			TextColor3 = C.sub,
+			TextTruncate = Enum.TextTruncate.AtEnd,
+		}, r)
+		-- the request data comes from the client, so re-check the real username
+		task.spawn(function()
+			local ok, real = pcall(function()
+				return Players:GetNameFromUserIdAsync(req.userId)
+			end)
+			if ok and real and string.lower(real) ~= string.lower(tostring(req.username)) and sub.Parent then
+				sub.Text = "NAME MISMATCH: real account is @" .. real
+				sub.TextColor3 = C.danger
+			end
+		end)
+		local sel = 3
+		local chips = {}
+		local x = 16
+		for i, dur in ipairs(DURATIONS) do
+			local w = textWidth(dur[1], 12, Enum.Font.GothamMedium) + 22
+			local b = new("TextButton", {
+				Text = dur[1],
+				AutoButtonColor = false,
+				Position = UDim2.fromOffset(x, 78),
+				Size = UDim2.fromOffset(w, 28),
+				BackgroundColor3 = C.white,
+				BackgroundTransparency = 0.9,
+				TextColor3 = C.sub,
+				TextSize = 12,
+				Font = Enum.Font.GothamMedium,
+				BorderSizePixel = 0,
+				ZIndex = 3,
+			}, r)
+			corner(b, 14)
+			chips[i] = b
+			x += w + 6
+			b.MouseButton1Click:Connect(function()
+				sel = i
+				for j, c in ipairs(chips) do
+					tween(c, 0.2, {
+						BackgroundTransparency = j == i and 0.7 or 0.9,
+						TextColor3 = j == i and C.white or C.sub,
+					})
+				end
+			end)
+		end
+		chips[sel].BackgroundTransparency = 0.7
+		chips[sel].TextColor3 = C.white
+		local approve = makeButton(r, "Approve", "primary", 88, 30, {
+			AnchorPoint = Vector2.new(1, 0),
+			Position = UDim2.new(1, -16, 0, 77),
+		})
+		local deny = makeButton(r, "Deny", "ghost", 76, 30, {
+			AnchorPoint = Vector2.new(1, 0),
+			Position = UDim2.new(1, -112, 0, 77),
+		})
+		approve.Button.MouseButton1Click:Connect(function()
+			ownerCall("/grant", { userId = req.userId, username = req.username, seconds = DURATIONS[sel][2] }, "Access granted")
+		end)
+		deny.Button.MouseButton1Click:Connect(function()
+			ownerCall("/deny", { userId = req.userId }, "Request denied")
+		end)
+	end
+
+	local function grantRow(gr)
+		local r = newRow(gAct, 74)
+		avatarOf(r, gr.userId)
+		label({
+			Text = tostring(gr.username or gr.userId),
+			Position = UDim2.fromOffset(74, 16),
+			Size = UDim2.new(1, -220, 0, 20),
+			Font = Enum.Font.GothamSemibold,
+			TextTruncate = Enum.TextTruncate.AtEnd,
+		}, r)
+		label({
+			Text = "ID " .. tostring(gr.userId) .. "   " .. timeLeft(gr.expires),
+			Position = UDim2.fromOffset(74, 38),
+			Size = UDim2.new(1, -220, 0, 16),
+			TextSize = 12,
+			TextColor3 = C.sub,
+		}, r)
+		local revoke = makeButton(r, "Revoke", "danger", 84, 30, {
+			AnchorPoint = Vector2.new(1, 0.5),
+			Position = UDim2.new(1, -16, 0.5, 0),
+		})
+		revoke.Button.MouseButton1Click:Connect(function()
+			ownerCall("/revoke", { userId = gr.userId }, "Access revoked")
+		end)
+	end
+
+	function ownerRefresh()
+		if ACCESS.Api == "" then
+			setPending("Server not set up")
+			return
+		end
+		if Access.ownerKey == "" then
+			setPending("Enter your owner key")
+			return
+		end
+		task.spawn(function()
+			local reqs, e1 = httpReq("GET", "/requests", nil, Access.ownerKey)
+			local grants, e2 = httpReq("GET", "/grants", nil, Access.ownerKey)
+			if not reqs or not grants then
+				setPending("Error: " .. tostring(e1 or e2))
+				return
+			end
+			setPending(#reqs)
+			setGrantCount(#grants)
+			clearGroup(gReq)
+			if #reqs == 0 then
+				emptyRow(gReq, "No pending requests")
+			end
+			for _, q in ipairs(reqs) do
+				requestCard(q)
+			end
+			clearGroup(gAct)
+			if #grants == 0 then
+				emptyRow(gAct, "Nobody has access yet")
+			end
+			for _, gr in ipairs(grants) do
+				grantRow(gr)
+			end
+		end)
+	end
+
+	emptyRow(gReq, "Enter your owner key below, then refresh")
+	emptyRow(gAct, "Nobody has access yet")
+
+	local gTools = COMP.Group(page, "Manage")
+	local keyIn = COMP.Input(gTools, {
+		text = "Owner key",
+		desc = "Stored on this PC only. Needed to approve people.",
+		placeholder = "paste your owner key",
+		buttonText = "Save",
 		callback = function(text)
-			if Env.customSky(text) then
-				toast("Skybox applied")
-			else
-				toast("Invalid IDs", "Paste 1 or 6 numeric asset IDs.")
-			end
+			Access.ownerKey = text
+			Cfg.writeText("ownerkey", text)
+			toast("Owner key saved")
+			ownerRefresh()
 		end,
 	})
-	local cloudsNow = Env.getClouds(false)
-	COMP.Toggle(gSky, {
-		key = "env.clouds",
-		noReset = true,
-		text = "Clouds",
-		default = cloudsNow and cloudsNow.Enabled or false,
-		callback = function(on)
-			Env.clouds(on, nil)
-		end,
-	})
-	COMP.Slider(gSky, {
-		key = "env.cover",
-		noReset = true,
-		text = "Cloud cover",
-		min = 0,
-		max = 1,
-		step = 0.05,
-		default = cloudsNow and cloudsNow.Cover or 0.5,
-		callback = function(v)
-			Env.clouds(nil, v)
-		end,
-	})
-	COMP.Toggle(gSky, {
-		key = "env.domes",
-		noReset = true,
-		text = "Hide sky domes",
-		desc = "Hides fake sky meshes while presets are on",
-		default = false,
-		callback = function(on)
-			Env.hideDomes = on
-			Env.refreshDomes()
-		end,
-	})
-
-	-- ---- lighting
-	local gLight = COMP.Group(page, "Lighting")
-	Env.ui.brightness = COMP.Slider(gLight, {
-		key = "env.brightness",
-		noReset = true,
-		text = "Brightness",
-		min = 0,
-		max = 10,
-		step = 0.1,
-		default = math.clamp(Lighting.Brightness, 0, 10),
-		callback = function(v)
-			Env.set({ Brightness = v })
-		end,
-	})
-	Env.ui.exposure = COMP.Slider(gLight, {
-		key = "env.exposure",
-		noReset = true,
-		text = "Exposure",
-		min = -3,
-		max = 3,
-		step = 0.1,
-		default = math.clamp(Lighting.ExposureCompensation, -3, 3),
-		callback = function(v)
-			Env.set({ ExposureCompensation = v })
-		end,
-	})
-	Env.ui.ambient = COMP.ColorPicker(gLight, {
-		key = "env.ambient",
-		noReset = true,
-		text = "Ambient light",
-		default = Lighting.OutdoorAmbient,
-		callback = function(c)
-			Env.set({ Ambient = c, OutdoorAmbient = c })
-		end,
-	})
-	Env.ui.fog = COMP.Slider(gLight, {
-		key = "env.fog",
-		noReset = true,
-		text = "Fog distance",
-		min = 100,
-		max = 5000,
-		step = 50,
-		default = Lighting.FogEnd >= 5000 and 5000 or math.max(100, Lighting.FogEnd),
-		format = function(v)
-			if v >= 5000 then
-				return "Off"
-			end
-			return math.floor(v) .. " studs"
-		end,
-		callback = function(v)
-			if v >= 5000 then
-				Env.set({ FogEnd = 100000, FogStart = 0 })
-			else
-				Env.set({ FogEnd = v, FogStart = 0 })
-			end
-		end,
-	})
-	Env.ui.fogColor = COMP.ColorPicker(gLight, {
-		key = "env.fogColor",
-		noReset = true,
-		text = "Fog color",
-		default = Lighting.FogColor,
-		callback = function(c)
-			Env.set({ FogColor = c })
-		end,
-	})
-
-	-- ---- reset
-	local gReset = COMP.Group(page, "Reset")
-	COMP.Button(gReset, {
-		text = "Reset environment",
-		desc = "Puts lighting, sky and clouds back to the game's own",
-		buttonText = "Reset",
+	keyIn.Box.Text = Access.ownerKey
+	COMP.Button(gTools, {
+		text = "Refresh",
+		desc = "Reloads requests and active access",
+		buttonText = "Refresh",
 		callback = function()
-			Env.reset()
-			Env.ui.time.Clear()
-			Env.ui.timeSlider.Set(Lighting.ClockTime % 24, true)
-			Env.ui.sky.Set("Game default", true)
-			Env.ui.brightness.Set(math.clamp(Lighting.Brightness, 0, 10), true)
-			Env.ui.exposure.Set(math.clamp(Lighting.ExposureCompensation, -3, 3), true)
-			Env.ui.ambient.Set(Lighting.OutdoorAmbient, true)
-			Env.ui.fog.Set(Lighting.FogEnd >= 5000 and 5000 or math.max(100, Lighting.FogEnd), true)
-			Env.ui.fogColor.Set(Lighting.FogColor, true)
-			toast("Environment reset")
+			ownerRefresh()
 		end,
 	})
+	local grantDur = COMP.Dropdown(gTools, {
+		text = "Grant duration",
+		options = DUR_NAMES,
+		default = "7 days",
+	})
+	COMP.Input(gTools, {
+		text = "Grant by username",
+		desc = "Gives someone access without a request",
+		placeholder = "roblox username",
+		buttonText = "Grant",
+		callback = function(name)
+			task.spawn(function()
+				local ok, uid = pcall(function()
+					return Players:GetUserIdFromNameAsync(name)
+				end)
+				if not ok then
+					toast("User not found", name)
+					return
+				end
+				local secs
+				for _, dur in ipairs(DURATIONS) do
+					if dur[1] == grantDur.Get() then
+						secs = dur[2]
+					end
+				end
+				ownerCall("/grant", { userId = uid, username = name, seconds = secs }, "Access granted to " .. name)
+			end)
+		end,
+	})
+
+	task.spawn(function()
+		task.wait(1)
+		ownerRefresh()
+	end)
 end
 
 --========================================================================
