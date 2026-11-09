@@ -1,0 +1,6002 @@
+--!nonstrict
+--!nolint UnknownGlobal
+--[[
+	KEVINWARE  -  glass top bar UI
+	Single file. Executor (gethui / CoreGui) or LocalScript (PlayerGui).
+
+	Right Shift   hide / show the UI          (rebindable in Settings)
+	Cross / logo  minimize / unminimize the bar
+	Click a tab   open its panel, click again to close it
+
+	Tabs: Aim, Movement, ESP, Macros (empty for now), Environment, Settings.
+	All icons are drawn in code, no asset IDs.
+
+	Add content to a tab later:
+	    local KW = getgenv().Kevinware
+	    local g = KW.Components.Group(KW.Tabs.Aim.Content, "Section")
+	    KW.Components.Toggle(g, { text = "Aimbot", callback = function(on) end })
+]]
+
+local Players = game:GetService("Players")
+local TweenService = game:GetService("TweenService")
+local UserInputService = game:GetService("UserInputService")
+local TextService = game:GetService("TextService")
+local RunService = game:GetService("RunService")
+local Lighting = game:GetService("Lighting")
+local Stats = game:GetService("Stats")
+local Workspace = game:GetService("Workspace")
+
+local LocalPlayer = Players.LocalPlayer
+while not LocalPlayer do
+	task.wait()
+	LocalPlayer = Players.LocalPlayer
+end
+
+local CONFIG = {
+	Name = "Kevinware",
+	GuiName = "KevinwareUI",
+	ToggleKey = Enum.KeyCode.RightShift,
+	ShowLoader = true,
+}
+
+-- remove a previous run (this script or the earlier test scripts)
+pcall(function()
+	if getgenv then
+		local g = getgenv()
+		if g.Kevinware then
+			g.Kevinware.Unload()
+		end
+		if g.TopBarUI then
+			g.TopBarUI.Destroy()
+		end
+		if g.GlassPanel then
+			g.GlassPanel.Destroy()
+		end
+	end
+end)
+
+--========================================================================
+-- UNLOAD REGISTRY
+--========================================================================
+local cleanups = {}
+local unloaded = false
+local function onUnload(fn)
+	table.insert(cleanups, fn)
+end
+local function bindConn(signal, fn)
+	local c = signal:Connect(fn)
+	onUnload(function()
+		c:Disconnect()
+	end)
+	return c
+end
+local Unload -- assigned near the bottom
+
+--========================================================================
+-- METRICS / COLORS
+--========================================================================
+local rgb = Color3.fromRGB
+
+local M = {
+	BarH = 56,
+	BarTop = 14,
+	Pad = 8,
+	Btn = 40,
+	TabH = 40,
+	TabPadX = 16,
+	Icon = 20,
+	IconGap = 8,
+	TabGap = 2,
+	FontSize = 14,
+	PanelGap = 8,
+	PanelMaxH = 440,
+}
+M.PanelY = M.BarTop + M.BarH + M.PanelGap
+M.HideOffset = M.PanelY + M.PanelMaxH + 80
+
+local C = {
+	white = Color3.new(1, 1, 1),
+	black = Color3.new(0, 0, 0),
+	sub = rgb(150, 153, 161),
+	inactive = rgb(158, 161, 169),
+	hover = rgb(216, 218, 224),
+	active = Color3.new(1, 1, 1),
+	danger = rgb(255, 92, 92),
+	dark = rgb(18, 19, 22),
+}
+
+local SHADOW_T = { 0.9, 0.93, 0.95, 0.97 }
+
+--========================================================================
+-- HELPERS
+--========================================================================
+local function tween(obj, t, props, style, dir)
+	local tw = TweenService:Create(
+		obj,
+		TweenInfo.new(t, style or Enum.EasingStyle.Quint, dir or Enum.EasingDirection.Out),
+		props
+	)
+	tw:Play()
+	return tw
+end
+
+-- tween when dur > 0, otherwise assign directly
+local function setProps(obj, dur, props, style, dir)
+	if dur and dur > 0 then
+		return tween(obj, dur, props, style, dir)
+	end
+	for k, v in pairs(props) do
+		obj[k] = v
+	end
+	return nil
+end
+
+local function new(class, props, parent)
+	local obj = Instance.new(class)
+	for k, v in pairs(props) do
+		obj[k] = v
+	end
+	obj.Parent = parent
+	return obj
+end
+
+local function frame(props, parent)
+	props.BorderSizePixel = 0
+	return new("Frame", props, parent)
+end
+
+local function corner(obj, r)
+	return new("UICorner", { CornerRadius = UDim.new(0, r) }, obj)
+end
+
+local function stroke(obj, transparency, color, thickness)
+	return new("UIStroke", {
+		ApplyStrokeMode = Enum.ApplyStrokeMode.Border,
+		Color = color or C.white,
+		Transparency = transparency,
+		Thickness = thickness or 1,
+	}, obj)
+end
+
+-- 1px rim that is bright on top and fades toward the bottom
+local function glassStroke(obj)
+	local st = stroke(obj, 0, C.white, 1)
+	new("UIGradient", {
+		Rotation = 90,
+		Transparency = NumberSequence.new({
+			NumberSequenceKeypoint.new(0, 0.6),
+			NumberSequenceKeypoint.new(0.5, 0.9),
+			NumberSequenceKeypoint.new(1, 0.8),
+		}),
+	}, st)
+	return st
+end
+
+local function label(props, parent)
+	props.BackgroundTransparency = 1
+	props.BorderSizePixel = 0
+	props.Font = props.Font or Enum.Font.GothamMedium
+	props.TextColor3 = props.TextColor3 or C.white
+	props.TextSize = props.TextSize or M.FontSize
+	props.TextXAlignment = props.TextXAlignment or Enum.TextXAlignment.Left
+	return new("TextLabel", props, parent)
+end
+
+local function hoverable(btn, target, base, over, down)
+	local hovering = false
+	btn.MouseEnter:Connect(function()
+		hovering = true
+		tween(target, 0.15, { BackgroundTransparency = over })
+	end)
+	btn.MouseLeave:Connect(function()
+		hovering = false
+		tween(target, 0.2, { BackgroundTransparency = base })
+	end)
+	btn.MouseButton1Down:Connect(function()
+		tween(target, 0.08, { BackgroundTransparency = down })
+	end)
+	btn.MouseButton1Up:Connect(function()
+		tween(target, 0.15, { BackgroundTransparency = hovering and over or base })
+	end)
+end
+
+local function makeShadow(parent, radius, startHidden)
+	local layers = {}
+	for i = 1, #SHADOW_T do
+		local f = frame({
+			AnchorPoint = Vector2.new(0.5, 0.5),
+			Position = UDim2.new(0.5, 0, 0.5, 3 + i * 2),
+			Size = UDim2.new(1, i * 10, 1, i * 10),
+			BackgroundColor3 = C.black,
+			BackgroundTransparency = startHidden and 1 or SHADOW_T[i],
+			ZIndex = 0,
+		}, parent)
+		corner(f, radius + i * 5)
+		layers[i] = f
+	end
+	return layers
+end
+
+local function textWidth(text, size, font)
+	local ok, v = pcall(function()
+		return TextService:GetTextSize(text, size or M.FontSize, font or Enum.Font.GothamMedium, Vector2.new(1000, 100))
+	end)
+	if ok and v then
+		return math.ceil(v.X)
+	end
+	return math.ceil(#text * (size or M.FontSize) * 0.6)
+end
+
+local orderCount = setmetatable({}, { __mode = "k" })
+local function nextOrder(p)
+	local n = (orderCount[p] or 0) + 1
+	orderCount[p] = n
+	return n
+end
+
+local function luma(c)
+	return 0.299 * c.R + 0.587 * c.G + 0.114 * c.B
+end
+
+local function lighten(c, t)
+	return c:Lerp(C.white, t)
+end
+
+local function darken(c, t)
+	return c:Lerp(C.black, t)
+end
+
+local function inputPos(input)
+	if input.UserInputType == Enum.UserInputType.Touch then
+		return Vector2.new(input.Position.X, input.Position.Y)
+	end
+	return UserInputService:GetMouseLocation()
+end
+
+local function isPress(input)
+	local t = input.UserInputType
+	return t == Enum.UserInputType.MouseButton1 or t == Enum.UserInputType.Touch
+end
+
+-- press + drag on `hit`; calls onDrag(x, y) in screen pixels
+local function dragArea(hit, onDrag, onBegin, onEnd)
+	hit.InputBegan:Connect(function(input)
+		if not isPress(input) then
+			return
+		end
+		local p = inputPos(input)
+		if onBegin then
+			onBegin()
+		end
+		onDrag(p.X, p.Y)
+		local moveConn, endConn
+		moveConn = UserInputService.InputChanged:Connect(function(i)
+			if i.UserInputType == Enum.UserInputType.MouseMovement or i.UserInputType == Enum.UserInputType.Touch then
+				local q = inputPos(i)
+				onDrag(q.X, q.Y)
+			end
+		end)
+		endConn = UserInputService.InputEnded:Connect(function(i)
+			if isPress(i) then
+				moveConn:Disconnect()
+				endConn:Disconnect()
+				if onEnd then
+					onEnd()
+				end
+			end
+		end)
+	end)
+end
+
+-- returns a function that tweens a 2-colour gradient
+local function gradientSetter(grad)
+	local a, b = Instance.new("Color3Value"), Instance.new("Color3Value")
+	local function upd()
+		grad.Color = ColorSequence.new(a.Value, b.Value)
+	end
+	a.Changed:Connect(upd)
+	b.Changed:Connect(upd)
+	return function(c1, c2, dur)
+		if dur and dur > 0 then
+			tween(a, dur, { Value = c1 })
+			tween(b, dur, { Value = c2 })
+		else
+			a.Value = c1
+			b.Value = c2
+		end
+	end
+end
+
+--========================================================================
+-- THEME
+--========================================================================
+local Theme = { listeners = {} }
+local PRESETS = {
+	{
+		name = "Glass",
+		accent = rgb(244, 245, 249),
+		barTop = rgb(46, 48, 54),
+		barBot = rgb(19, 20, 23),
+		panelTop = rgb(88, 91, 96),
+		panelBot = rgb(54, 56, 60),
+		group = rgb(24, 25, 27),
+	},
+	{
+		name = "Midnight",
+		accent = rgb(104, 148, 255),
+		barTop = rgb(26, 32, 54),
+		barBot = rgb(10, 12, 24),
+		panelTop = rgb(48, 58, 92),
+		panelBot = rgb(24, 29, 52),
+		group = rgb(12, 15, 30),
+	},
+	{
+		name = "Violet",
+		accent = rgb(170, 118, 255),
+		barTop = rgb(42, 30, 66),
+		barBot = rgb(16, 10, 30),
+		panelTop = rgb(78, 58, 118),
+		panelBot = rgb(40, 28, 68),
+		group = rgb(20, 13, 38),
+	},
+	{
+		name = "Rose",
+		accent = rgb(255, 110, 150),
+		barTop = rgb(58, 30, 40),
+		barBot = rgb(24, 10, 16),
+		panelTop = rgb(110, 64, 78),
+		panelBot = rgb(60, 32, 42),
+		group = rgb(32, 14, 20),
+	},
+	{
+		name = "Emerald",
+		accent = rgb(62, 214, 152),
+		barTop = rgb(20, 48, 42),
+		barBot = rgb(8, 20, 17),
+		panelTop = rgb(52, 100, 88),
+		panelBot = rgb(26, 52, 45),
+		group = rgb(10, 26, 22),
+	},
+	{
+		name = "Amber",
+		accent = rgb(255, 186, 82),
+		barTop = rgb(56, 44, 26),
+		barBot = rgb(22, 16, 8),
+		panelTop = rgb(108, 88, 54),
+		panelBot = rgb(58, 46, 28),
+		group = rgb(30, 22, 12),
+	},
+}
+Theme.presets = PRESETS
+Theme.values = {}
+
+local function computeDerived(v)
+	v.onAccent = luma(v.accent) > 0.6 and C.dark or C.white
+end
+
+for k, v in pairs(PRESETS[1]) do
+	Theme.values[k] = v
+end
+Theme.values.preset = "Glass"
+Theme.values.alpha = 0.12
+Theme.values.rainbow = false
+computeDerived(Theme.values)
+
+-- fn(values, instant) is called now and on every change
+function Theme.bind(fn)
+	table.insert(Theme.listeners, fn)
+	fn(Theme.values, true)
+	return fn
+end
+
+function Theme.apply(patch, instant)
+	for k, v in pairs(patch) do
+		Theme.values[k] = v
+	end
+	computeDerived(Theme.values)
+	for _, fn in ipairs(Theme.listeners) do
+		pcall(fn, Theme.values, instant)
+	end
+end
+
+function Theme.setPreset(name)
+	for _, p in ipairs(PRESETS) do
+		if p.name == name then
+			local patch = { preset = name }
+			for k, v in pairs(p) do
+				if k ~= "name" then
+					patch[k] = v
+				end
+			end
+			Theme.apply(patch)
+			return
+		end
+	end
+end
+
+--========================================================================
+-- ICONS (drawn from frames, strokes and rounded lines; 24x24 design grid)
+--========================================================================
+local function buildIcon(kind, size, parent, color, thickness)
+	local s = size / 24
+	local TH = thickness or 2
+	local holder = new("Frame", {
+		BackgroundTransparency = 1,
+		BorderSizePixel = 0,
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		Position = UDim2.fromScale(0.5, 0.5),
+		Size = UDim2.fromOffset(size, size),
+	}, parent)
+
+	local parts = {}
+	local function reg(obj, prop)
+		table.insert(parts, { obj, prop })
+	end
+
+	local function line(x1, y1, x2, y2)
+		local dx, dy = (x2 - x1) * s, (y2 - y1) * s
+		local len = math.sqrt(dx * dx + dy * dy)
+		local props = {
+			AnchorPoint = Vector2.new(0.5, 0.5),
+			Position = UDim2.fromOffset((x1 + x2) / 2 * s, (y1 + y2) / 2 * s),
+			BackgroundColor3 = color,
+		}
+		if dy == 0 then
+			props.Size = UDim2.fromOffset(len + TH, TH)
+		elseif dx == 0 then
+			props.Size = UDim2.fromOffset(TH, len + TH)
+		else
+			props.Size = UDim2.fromOffset(len + TH, TH)
+			props.Rotation = math.deg(math.atan2(dy, dx))
+		end
+		local f = frame(props, holder)
+		corner(f, 99)
+		reg(f, "BackgroundColor3")
+	end
+
+	local function ring(cx, cy, r)
+		local d = math.max(r * 2 * s - TH, 1)
+		local f = frame({
+			AnchorPoint = Vector2.new(0.5, 0.5),
+			Position = UDim2.fromOffset(cx * s, cy * s),
+			Size = UDim2.fromOffset(d, d),
+			BackgroundTransparency = 1,
+		}, holder)
+		corner(f, 999)
+		reg(stroke(f, 0, color, TH), "Color")
+	end
+
+	local function dot(cx, cy, d)
+		local f = frame({
+			AnchorPoint = Vector2.new(0.5, 0.5),
+			Position = UDim2.fromOffset(cx * s, cy * s),
+			Size = UDim2.fromOffset(d * s, d * s),
+			BackgroundColor3 = color,
+		}, holder)
+		corner(f, 999)
+		reg(f, "BackgroundColor3")
+	end
+
+	local function pill(cx, cy, w, h)
+		local f = frame({
+			AnchorPoint = Vector2.new(0.5, 0.5),
+			Position = UDim2.fromOffset(cx * s, cy * s),
+			Size = UDim2.fromOffset(w * s, h * s),
+			BackgroundColor3 = color,
+		}, holder)
+		corner(f, 999)
+		reg(f, "BackgroundColor3")
+	end
+
+	local function box(cx, cy, w, h, r)
+		local f = frame({
+			AnchorPoint = Vector2.new(0.5, 0.5),
+			Position = UDim2.fromOffset(cx * s, cy * s),
+			Size = UDim2.fromOffset(math.max(w * s - TH, 1), math.max(h * s - TH, 1)),
+			BackgroundTransparency = 1,
+		}, holder)
+		corner(f, r * s)
+		reg(stroke(f, 0, color, TH), "Color")
+	end
+
+	local function seg(x1, x2, y)
+		if x2 - x1 >= 0.01 then
+			line(x1, y, x2, y)
+		end
+	end
+
+	if kind == "aim" then
+		ring(12, 12, 9)
+		line(12, 3, 12, 7)
+		line(12, 21, 12, 17)
+		line(3, 12, 7, 12)
+		line(21, 12, 17, 12)
+		dot(12, 12, 3)
+	elseif kind == "movement" then
+		line(4, 6, 10, 12)
+		line(10, 12, 4, 18)
+		line(13, 6, 19, 12)
+		line(19, 12, 13, 18)
+	elseif kind == "esp" then
+		line(3, 3, 8, 3)
+		line(3, 3, 3, 8)
+		line(21, 3, 16, 3)
+		line(21, 3, 21, 8)
+		line(3, 21, 8, 21)
+		line(3, 21, 3, 16)
+		line(21, 21, 16, 21)
+		line(21, 21, 21, 16)
+		dot(12, 9.5, 4.5)
+		pill(12, 16.2, 9, 5)
+	elseif kind == "macros" then
+		box(12, 12, 20, 14, 3.5)
+		dot(7.5, 10, 2.2)
+		dot(12, 10, 2.2)
+		dot(16.5, 10, 2.2)
+		line(8.5, 14.5, 15.5, 14.5)
+	elseif kind == "environment" then
+		ring(12, 12, 4.2)
+		line(12, 2.5, 12, 5)
+		line(12, 19, 12, 21.5)
+		line(2.5, 12, 5, 12)
+		line(19, 12, 21.5, 12)
+		line(5.3, 5.3, 7, 7)
+		line(17, 17, 18.7, 18.7)
+		line(18.7, 5.3, 17, 7)
+		line(7, 17, 5.3, 18.7)
+	elseif kind == "settings" then
+		seg(3, 11, 6)
+		dot(16, 6, 5)
+		seg(13, 21, 12)
+		dot(8, 12, 5)
+		seg(3, 9, 18)
+		seg(19, 21, 18)
+		dot(14, 18, 5)
+	elseif kind == "cross" then
+		line(5, 5, 19, 19)
+		line(19, 5, 5, 19)
+	elseif kind == "chevron" then
+		line(6, 9, 12, 15)
+		line(12, 15, 18, 9)
+	elseif kind == "check" then
+		line(5, 12.5, 10, 17.5)
+		line(10, 17.5, 19, 7)
+	elseif kind == "k" then
+		line(7, 4, 7, 20)
+		line(16.5, 4, 8, 12.3)
+		line(10.4, 10.4, 17, 20)
+	end
+
+	local api = { holder = holder }
+	function api.SetColor(c, t)
+		for _, p in ipairs(parts) do
+			if t and t > 0 then
+				tween(p[1], t, { [p[2]] = c })
+			else
+				p[1][p[2]] = c
+			end
+		end
+	end
+	return api
+end
+
+-- Kevinware mark: two stacked glass tiles with a bold K, tinted by the accent colour
+local function buildLogo(size, parent)
+	local holder = new("CanvasGroup", {
+		Name = "Logo",
+		BackgroundTransparency = 1,
+		BorderSizePixel = 0,
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		Position = UDim2.fromScale(0.5, 0.5),
+		Size = UDim2.fromOffset(size, size),
+	}, parent)
+	local sc = new("UIScale", { Scale = 1 }, holder)
+	local fs = math.floor(size * 0.78)
+	local off = size - fs
+	local r = math.floor(fs * 0.3)
+
+	local back = frame({
+		Position = UDim2.fromOffset(off, off),
+		Size = UDim2.fromOffset(fs, fs),
+		BackgroundColor3 = C.white,
+		BackgroundTransparency = 0.3,
+	}, holder)
+	corner(back, r)
+	stroke(back, 0.75)
+	local backGrad = new("UIGradient", { Rotation = 55 }, back)
+	local setBack = gradientSetter(backGrad)
+
+	local front = frame({ Size = UDim2.fromOffset(fs, fs), BackgroundColor3 = C.white }, holder)
+	corner(front, r)
+	local frontGrad = new("UIGradient", { Rotation = 55 }, front)
+	local setFront = gradientSetter(frontGrad)
+	local rim = stroke(front, 0, C.white, 1)
+	new("UIGradient", {
+		Rotation = 90,
+		Transparency = NumberSequence.new({
+			NumberSequenceKeypoint.new(0, 0.2),
+			NumberSequenceKeypoint.new(1, 0.85),
+		}),
+	}, rim)
+
+	Theme.bind(function(v, instant)
+		local d = instant and 0 or 0.35
+		setFront(lighten(v.accent, 0.18), darken(v.accent, 0.3), d)
+		setBack(darken(v.accent, 0.45), darken(v.accent, 0.72), d)
+	end)
+	buildIcon("k", fs * 0.66, front, C.dark, math.max(2.6, fs * 0.105))
+	return holder, sc
+end
+
+--========================================================================
+-- CONFIG STORE  (every component with a `key` is saved / exported)
+--========================================================================
+local B64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+local B64REV = {}
+for i = 1, 64 do
+	B64REV[B64:byte(i)] = i - 1
+end
+
+local function b64encode(data)
+	local out = {}
+	for i = 1, #data, 3 do
+		local a, b, c = data:byte(i, i + 2)
+		local n = bit32.bor(bit32.lshift(a, 16), bit32.lshift(b or 0, 8), c or 0)
+		local c1 = bit32.band(bit32.rshift(n, 18), 63)
+		local c2 = bit32.band(bit32.rshift(n, 12), 63)
+		local c3 = bit32.band(bit32.rshift(n, 6), 63)
+		local c4 = bit32.band(n, 63)
+		out[#out + 1] = B64:sub(c1 + 1, c1 + 1)
+			.. B64:sub(c2 + 1, c2 + 1)
+			.. (b and B64:sub(c3 + 1, c3 + 1) or "=")
+			.. (c and B64:sub(c4 + 1, c4 + 1) or "=")
+	end
+	return table.concat(out)
+end
+
+local function b64decode(s)
+	s = s:gsub("[^%w%+/=]", "")
+	local out = {}
+	for i = 1, #s, 4 do
+		local c1, c2, c3, c4 = s:byte(i, i + 3)
+		local n1, n2 = B64REV[c1], B64REV[c2]
+		local n3 = (c3 and c3 ~= 61) and B64REV[c3] or nil
+		local n4 = (c4 and c4 ~= 61) and B64REV[c4] or nil
+		local n = bit32.bor(bit32.lshift(n1, 18), bit32.lshift(n2, 12), bit32.lshift(n3 or 0, 6), n4 or 0)
+		out[#out + 1] = string.char(bit32.band(bit32.rshift(n, 16), 255))
+		if n3 then
+			out[#out + 1] = string.char(bit32.band(bit32.rshift(n, 8), 255))
+		end
+		if n4 then
+			out[#out + 1] = string.char(bit32.band(n, 255))
+		end
+	end
+	return table.concat(out)
+end
+
+local function toHex(c)
+	return string.format("#%02X%02X%02X", math.floor(c.R * 255 + 0.5), math.floor(c.G * 255 + 0.5), math.floor(c.B * 255 + 0.5))
+end
+
+local function fromHex(h)
+	local r = tonumber(h:sub(2, 3), 16)
+	local g = tonumber(h:sub(4, 5), 16)
+	local b = tonumber(h:sub(6, 7), 16)
+	if not (r and g and b) then
+		return nil
+	end
+	return Color3.fromRGB(r, g, b)
+end
+
+local Cfg = { items = {}, order = {}, auto = false, suppress = false, stamp = 0, file = "Kevinware/config.txt" }
+
+function Cfg.add(key, get, set, opts)
+	opts = opts or {}
+	local ok, def = pcall(get)
+	Cfg.items[key] = {
+		get = get,
+		set = set,
+		default = ok and def or nil,
+		noReset = opts.noReset,
+		skip = opts.skip,
+		noExport = opts.noExport,
+	}
+	table.insert(Cfg.order, key)
+end
+
+function Cfg.canFile()
+	return type(writefile) == "function" and type(readfile) == "function" and type(isfile) == "function"
+end
+
+function Cfg.snapshot()
+	local d = {}
+	for _, key in ipairs(Cfg.order) do
+		local it = Cfg.items[key]
+		if not it.noExport and not (it.skip and it.skip()) then
+			local ok, v = pcall(it.get)
+			if ok and v ~= nil and v ~= it.default then
+				d[key] = v
+			end
+		end
+	end
+	return { v = 1, auto = Cfg.auto, d = d }
+end
+
+function Cfg.encode()
+	return "KW1:" .. b64encode(game:GetService("HttpService"):JSONEncode(Cfg.snapshot()))
+end
+
+function Cfg.decode(code)
+	code = tostring(code or ""):gsub("%s+", "")
+	if code:sub(1, 4) ~= "KW1:" then
+		return nil
+	end
+	local ok, data = pcall(function()
+		return game:GetService("HttpService"):JSONDecode(b64decode(code:sub(5)))
+	end)
+	if ok and type(data) == "table" and type(data.d) == "table" then
+		return data
+	end
+	return nil
+end
+
+-- applies a decoded config; keys missing from it go back to their default
+function Cfg.apply(data)
+	Cfg.suppress = true
+	local n = 0
+	for _, key in ipairs(Cfg.order) do
+		local it = Cfg.items[key]
+		local v = data.d[key]
+		if v ~= nil then
+			if pcall(it.set, v) then
+				n += 1
+			end
+		elseif not it.noReset and it.default ~= nil then
+			pcall(it.set, it.default)
+		end
+	end
+	Cfg.suppress = false
+	return n
+end
+
+function Cfg.saveFile()
+	if not Cfg.canFile() then
+		return false
+	end
+	pcall(function()
+		if type(makefolder) == "function" and type(isfolder) == "function" and not isfolder("Kevinware") then
+			makefolder("Kevinware")
+		end
+	end)
+	return (pcall(writefile, Cfg.file, Cfg.encode()))
+end
+
+function Cfg.loadFile()
+	if not Cfg.canFile() then
+		return nil
+	end
+	local ok, exists = pcall(isfile, Cfg.file)
+	if not (ok and exists) then
+		return nil
+	end
+	local ok2, txt = pcall(readfile, Cfg.file)
+	if not ok2 then
+		return nil
+	end
+	return Cfg.decode(txt)
+end
+
+-- debounced autosave
+function Cfg.dirty()
+	if Cfg.suppress or not Cfg.auto then
+		return
+	end
+	Cfg.stamp += 1
+	local s = Cfg.stamp
+	task.delay(1.2, function()
+		if s == Cfg.stamp and Cfg.auto and not unloaded then
+			Cfg.saveFile()
+		end
+	end)
+end
+
+function Cfg.copy(text)
+	local fn = (type(setclipboard) == "function" and setclipboard)
+		or (type(toclipboard) == "function" and toclipboard)
+		or (type(set_clipboard) == "function" and set_clipboard)
+	if not fn then
+		return false
+	end
+	return (pcall(fn, text))
+end
+
+--========================================================================
+-- TABS + LAYOUT MATH (deterministic, no AutomaticSize)
+--========================================================================
+local TABS = {
+	{ id = "Aim", label = "Aim", icon = "aim" },
+	{ id = "Movement", label = "Movement", icon = "movement" },
+	{ id = "ESP", label = "ESP", icon = "esp" },
+	{ id = "Macros", label = "Macros", icon = "macros" },
+	{ id = "Environment", label = "Environment", icon = "environment" },
+	{ id = "Settings", label = "Settings", icon = "settings", gapBefore = 22 },
+}
+
+local tabsWidth = 0
+do
+	local x = 0
+	for _, t in ipairs(TABS) do
+		if t.gapBefore then
+			x += t.gapBefore
+		end
+		t.textW = textWidth(t.label) + 2
+		t.w = M.TabPadX * 2 + M.Icon + M.IconGap + t.textW
+		t.x = x
+		x += t.w + M.TabGap
+	end
+	tabsWidth = x - M.TabGap
+end
+local TABS_X = M.Pad + M.Btn + M.Pad
+local function barWidth(minimized)
+	if minimized then
+		return M.BarH
+	end
+	return TABS_X + tabsWidth + M.Pad
+end
+
+--========================================================================
+-- GUI + LAYERS
+--========================================================================
+local function resolveParent()
+	local ok, ui = pcall(function()
+		return gethui and gethui()
+	end)
+	if ok and ui then
+		return ui
+	end
+	local probe = Instance.new("ScreenGui")
+	local ok2 = pcall(function()
+		probe.Parent = game:GetService("CoreGui")
+	end)
+	probe:Destroy()
+	if ok2 then
+		return game:GetService("CoreGui")
+	end
+	return LocalPlayer:WaitForChild("PlayerGui")
+end
+
+local PARENT = resolveParent()
+do
+	local old = PARENT:FindFirstChild(CONFIG.GuiName)
+	if old then
+		old:Destroy()
+	end
+	local oldBlur = Lighting:FindFirstChild("KevinwareBlur")
+	if oldBlur then
+		oldBlur:Destroy()
+	end
+end
+
+local gui = new("ScreenGui", {
+	Name = CONFIG.GuiName,
+	ResetOnSpawn = false,
+	IgnoreGuiInset = true,
+	DisplayOrder = 1000,
+	ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
+}, nil)
+pcall(function()
+	if syn and syn.protect_gui then
+		syn.protect_gui(gui)
+	end
+end)
+gui.Parent = PARENT
+onUnload(function()
+	gui:Destroy()
+end)
+
+local blur = new("BlurEffect", { Name = "KevinwareBlur", Size = 0 }, Lighting)
+onUnload(function()
+	blur:Destroy()
+end)
+
+local state = { ready = false, listening = false, shown = false, minimized = false }
+local Snow = {} -- filled in later
+local Hud = {} -- filled in later
+
+local snowLayer = new("Frame", {
+	Name = "Snow",
+	BackgroundTransparency = 1,
+	BorderSizePixel = 0,
+	Size = UDim2.fromScale(1, 1),
+	ZIndex = 1,
+	Visible = false,
+}, gui)
+
+local root = new("Frame", {
+	Name = "Root",
+	BackgroundTransparency = 1,
+	BorderSizePixel = 0,
+	Size = UDim2.fromScale(1, 1),
+	Position = UDim2.fromOffset(0, -M.HideOffset),
+	Visible = false,
+	ZIndex = 2,
+}, gui)
+local rootScale = new("UIScale", { Scale = 1 }, root)
+
+local hudLayer = new("Frame", {
+	Name = "Hud",
+	BackgroundTransparency = 1,
+	BorderSizePixel = 0,
+	Size = UDim2.fromScale(1, 1),
+	ZIndex = 3,
+}, gui)
+
+local uiScaleValue = 1
+local function setUiScale(s)
+	uiScaleValue = s
+	rootScale.Scale = s
+	root.Size = UDim2.fromScale(1 / s, 1 / s)
+end
+
+--========================================================================
+-- TOASTS (bottom centre)
+--========================================================================
+local toastHolder = new("Frame", {
+	Name = "Toasts",
+	AnchorPoint = Vector2.new(0.5, 1),
+	Position = UDim2.new(0.5, 0, 1, -28),
+	Size = UDim2.fromOffset(340, 0),
+	AutomaticSize = Enum.AutomaticSize.Y,
+	BackgroundTransparency = 1,
+	BorderSizePixel = 0,
+	ZIndex = 30,
+}, gui)
+new("UIListLayout", {
+	Padding = UDim.new(0, 8),
+	SortOrder = Enum.SortOrder.LayoutOrder,
+	HorizontalAlignment = Enum.HorizontalAlignment.Center,
+	VerticalAlignment = Enum.VerticalAlignment.Bottom,
+}, toastHolder)
+
+local toastCount = 0
+local function toast(title, message, duration)
+	toastCount += 1
+	local t = new("CanvasGroup", {
+		Size = UDim2.new(1, 0, 0, 0),
+		AutomaticSize = Enum.AutomaticSize.Y,
+		BackgroundColor3 = rgb(40, 42, 46),
+		BackgroundTransparency = 0.06,
+		GroupTransparency = 1,
+		BorderSizePixel = 0,
+		LayoutOrder = toastCount,
+	}, toastHolder)
+	corner(t, 18)
+	stroke(t, 0.88)
+	local sc = new("UIScale", { Scale = 0.9 }, t)
+	new("UIPadding", {
+		PaddingLeft = UDim.new(0, 16),
+		PaddingRight = UDim.new(0, 16),
+		PaddingTop = UDim.new(0, 11),
+		PaddingBottom = UDim.new(0, 11),
+	}, t)
+	new("UIListLayout", { Padding = UDim.new(0, 2), SortOrder = Enum.SortOrder.LayoutOrder }, t)
+	label({
+		Text = title,
+		Size = UDim2.new(1, 0, 0, 0),
+		AutomaticSize = Enum.AutomaticSize.Y,
+		TextWrapped = true,
+		Font = Enum.Font.GothamSemibold,
+		LayoutOrder = 1,
+	}, t)
+	if message and message ~= "" then
+		label({
+			Text = message,
+			Size = UDim2.new(1, 0, 0, 0),
+			AutomaticSize = Enum.AutomaticSize.Y,
+			TextWrapped = true,
+			TextSize = 12,
+			TextColor3 = C.sub,
+			LayoutOrder = 2,
+		}, t)
+	end
+	tween(t, 0.3, { GroupTransparency = 0 })
+	tween(sc, 0.4, { Scale = 1 }, Enum.EasingStyle.Back)
+	task.delay(duration or 3, function()
+		if t.Parent then
+			tween(t, 0.25, { GroupTransparency = 1 })
+			tween(sc, 0.25, { Scale = 0.94 })
+			task.delay(0.27, function()
+				t:Destroy()
+			end)
+		end
+	end)
+end
+
+--========================================================================
+-- BAR
+--========================================================================
+local barHolder = new("Frame", {
+	Name = "BarHolder",
+	AnchorPoint = Vector2.new(0.5, 0),
+	Position = UDim2.new(0.5, 0, 0, M.BarTop),
+	Size = UDim2.fromOffset(barWidth(false), M.BarH),
+	BackgroundTransparency = 1,
+	BorderSizePixel = 0,
+}, root)
+makeShadow(barHolder, M.BarH / 2, false)
+
+local bar = frame({
+	Name = "Bar",
+	Size = UDim2.fromScale(1, 1),
+	BackgroundColor3 = C.white,
+	BackgroundTransparency = 0.12,
+	ZIndex = 1,
+}, barHolder)
+corner(bar, M.BarH / 2)
+local barGrad = new("UIGradient", { Rotation = 90 }, bar)
+local setBarGrad = gradientSetter(barGrad)
+local barStroke = glassStroke(bar)
+
+-- ---------- cross (minimize) / logo ----------
+local crossBtn = new("TextButton", {
+	Name = "Minimize",
+	Text = "",
+	AutoButtonColor = false,
+	Position = UDim2.fromOffset(M.Pad, M.Pad),
+	Size = UDim2.fromOffset(M.Btn, M.Btn),
+	BackgroundColor3 = C.white,
+	BackgroundTransparency = 0.9,
+	BorderSizePixel = 0,
+	ZIndex = 3,
+}, bar)
+corner(crossBtn, M.Btn / 2)
+stroke(crossBtn, 0.9)
+
+local crossGroup = new("CanvasGroup", {
+	BackgroundTransparency = 1,
+	BorderSizePixel = 0,
+	Size = UDim2.fromScale(1, 1),
+}, crossBtn)
+local crossIcon = buildIcon("cross", 20, crossGroup, rgb(236, 237, 241))
+
+local logoGroup, logoScale = buildLogo(26, crossBtn)
+logoGroup.GroupTransparency = 1
+logoScale.Scale = 0.5
+hoverable(crossBtn, crossBtn, 0.9, 0.82, 0.74)
+
+-- ---------- tabs ----------
+local tabsClip = new("CanvasGroup", {
+	Name = "Tabs",
+	Position = UDim2.fromOffset(TABS_X, 0),
+	Size = UDim2.fromOffset(tabsWidth, M.BarH),
+	BackgroundTransparency = 1,
+	BorderSizePixel = 0,
+	ZIndex = 2,
+}, bar)
+
+local indicator = frame({
+	Name = "Indicator",
+	Position = UDim2.fromOffset(TABS[1].x, M.Pad),
+	Size = UDim2.fromOffset(TABS[1].w, M.TabH),
+	BackgroundColor3 = C.white,
+	BackgroundTransparency = 1,
+	ZIndex = 1,
+}, tabsClip)
+corner(indicator, M.TabH / 2)
+local indicatorStroke = glassStroke(indicator)
+indicatorStroke.Transparency = 1
+
+local active
+local indicatorAlpha = 0.86
+
+local function refreshTab(t)
+	local isActive = active == t
+	local col = isActive and C.active or (t.hovering and C.hover or C.inactive)
+	t.icon.SetColor(col, 0.2)
+	tween(t.text, 0.2, { TextColor3 = col })
+	tween(t.hoverBg, 0.2, { BackgroundTransparency = (t.hovering and not isActive) and 0.94 or 1 })
+end
+
+for _, t in ipairs(TABS) do
+	t.btn = new("TextButton", {
+		Name = t.id,
+		Text = "",
+		AutoButtonColor = false,
+		BackgroundTransparency = 1,
+		BorderSizePixel = 0,
+		Position = UDim2.fromOffset(t.x, M.Pad),
+		Size = UDim2.fromOffset(t.w, M.TabH),
+		ZIndex = 2,
+	}, tabsClip)
+
+	t.hoverBg = frame({
+		Size = UDim2.fromScale(1, 1),
+		BackgroundColor3 = C.white,
+		BackgroundTransparency = 1,
+	}, t.btn)
+	corner(t.hoverBg, M.TabH / 2)
+
+	local inner = frame({
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		Position = UDim2.fromScale(0.5, 0.5),
+		Size = UDim2.fromScale(1, 1),
+		BackgroundTransparency = 1,
+	}, t.btn)
+	local press = new("UIScale", { Scale = 1 }, inner)
+
+	t.icon = buildIcon(t.icon, M.Icon, inner, C.inactive)
+	t.icon.holder.Position = UDim2.new(0, M.TabPadX + M.Icon / 2, 0.5, 0)
+
+	t.text = label({
+		Text = t.label,
+		Position = UDim2.fromOffset(M.TabPadX + M.Icon + M.IconGap, 0),
+		Size = UDim2.new(0, t.textW, 1, 0),
+		TextColor3 = C.inactive,
+	}, inner)
+
+	t.hovering = false
+	t.btn.MouseEnter:Connect(function()
+		t.hovering = true
+		refreshTab(t)
+	end)
+	t.btn.MouseLeave:Connect(function()
+		t.hovering = false
+		refreshTab(t)
+		tween(press, 0.15, { Scale = 1 })
+	end)
+	t.btn.MouseButton1Down:Connect(function()
+		tween(press, 0.1, { Scale = 0.94 })
+	end)
+	t.btn.MouseButton1Up:Connect(function()
+		tween(press, 0.35, { Scale = 1 }, Enum.EasingStyle.Back)
+	end)
+end
+
+--========================================================================
+-- PANEL (sits right under the bar, same width)
+--========================================================================
+local panelHolder = new("Frame", {
+	Name = "PanelHolder",
+	AnchorPoint = Vector2.new(0.5, 0),
+	Position = UDim2.new(0.5, 0, 0, M.PanelY),
+	Size = UDim2.new(0.96, 0, 1, -(M.PanelY + 16)),
+	BackgroundTransparency = 1,
+	BorderSizePixel = 0,
+	Visible = false,
+}, root)
+new("UISizeConstraint", { MaxSize = Vector2.new(barWidth(false), M.PanelMaxH) }, panelHolder)
+local panelScale = new("UIScale", { Scale = 0.94 }, panelHolder)
+local panelShadow = makeShadow(panelHolder, 26, true)
+
+local panel = new("CanvasGroup", {
+	Name = "Panel",
+	Size = UDim2.fromScale(1, 1),
+	BackgroundTransparency = 1,
+	GroupTransparency = 1,
+	BorderSizePixel = 0,
+	ZIndex = 1,
+}, panelHolder)
+corner(panel, 26)
+local panelStroke = glassStroke(panel)
+panelStroke.Transparency = 1
+
+local panelBg = frame({
+	Name = "Bg",
+	Size = UDim2.fromScale(1, 1),
+	BackgroundColor3 = C.white,
+	BackgroundTransparency = 0.06,
+	ZIndex = 0,
+}, panel)
+local panelGrad = new("UIGradient", { Rotation = 90 }, panelBg)
+local setPanelGrad = gradientSetter(panelGrad)
+
+local body = frame({
+	Name = "Body",
+	Size = UDim2.fromScale(1, 1),
+	BackgroundTransparency = 1,
+	ZIndex = 1,
+}, panel)
+new("UIPadding", {
+	PaddingLeft = UDim.new(0, 14),
+	PaddingRight = UDim.new(0, 8),
+	PaddingTop = UDim.new(0, 14),
+	PaddingBottom = UDim.new(0, 14),
+}, body)
+
+-- one fading page per tab; page = ScrollingFrame that components are added to
+local Tabs = {}
+for _, t in ipairs(TABS) do
+	t.holder = new("CanvasGroup", {
+		Name = t.id,
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		Position = UDim2.fromScale(0.5, 0.5),
+		Size = UDim2.fromScale(1, 1),
+		BackgroundTransparency = 1,
+		GroupTransparency = 1,
+		BorderSizePixel = 0,
+		Visible = false,
+	}, body)
+	t.holderScale = new("UIScale", { Scale = 1 }, t.holder)
+	t.page = new("ScrollingFrame", {
+		Name = "Page",
+		Size = UDim2.fromScale(1, 1),
+		BackgroundTransparency = 1,
+		BorderSizePixel = 0,
+		CanvasSize = UDim2.new(),
+		AutomaticCanvasSize = Enum.AutomaticSize.Y,
+		ScrollingDirection = Enum.ScrollingDirection.Y,
+		ScrollBarThickness = 3,
+		ScrollBarImageColor3 = C.white,
+		ScrollBarImageTransparency = 0.75,
+		VerticalScrollBarInset = Enum.ScrollBarInset.None,
+	}, t.holder)
+	new("UIListLayout", { SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0, 14) }, t.page)
+	new("UIPadding", { PaddingRight = UDim.new(0, 8), PaddingBottom = UDim.new(0, 6) }, t.page)
+	Tabs[t.id] = { Content = t.page, Holder = t.holder }
+end
+
+local panelToken = 0
+local shownTab
+local function showPanel(t, switching)
+	panelToken += 1
+	local prev = shownTab
+	shownTab = t
+	if prev and prev ~= t then
+		tween(prev.holder, 0.12, { GroupTransparency = 1 })
+		task.delay(0.13, function()
+			if shownTab ~= prev then
+				prev.holder.Visible = false
+			end
+		end)
+	end
+	t.holder.Visible = true
+	t.holder.GroupTransparency = 1
+	t.holderScale.Scale = 0.985
+	tween(t.holder, 0.3, { GroupTransparency = 0 })
+	tween(t.holderScale, 0.45, { Scale = 1 }, Enum.EasingStyle.Back)
+	if switching and panelHolder.Visible then
+		return
+	end
+	panelHolder.Visible = true
+	panelHolder.Position = UDim2.new(0.5, 0, 0, M.PanelY - 22)
+	panelScale.Scale = 0.94
+	tween(panelHolder, 0.55, { Position = UDim2.new(0.5, 0, 0, M.PanelY) })
+	tween(panelScale, 0.6, { Scale = 1 }, Enum.EasingStyle.Back)
+	tween(panel, 0.3, { GroupTransparency = 0 })
+	tween(panelStroke, 0.3, { Transparency = 0 })
+	for i, l in ipairs(panelShadow) do
+		tween(l, 0.45, { BackgroundTransparency = SHADOW_T[i] })
+	end
+end
+
+local function hidePanel()
+	panelToken += 1
+	local token = panelToken
+	local leaving = shownTab
+	shownTab = nil
+	tween(panelHolder, 0.3, { Position = UDim2.new(0.5, 0, 0, M.PanelY - 14) })
+	tween(panelScale, 0.3, { Scale = 0.96 })
+	tween(panel, 0.22, { GroupTransparency = 1 })
+	tween(panelStroke, 0.22, { Transparency = 1 })
+	for _, l in ipairs(panelShadow) do
+		tween(l, 0.22, { BackgroundTransparency = 1 })
+	end
+	task.delay(0.32, function()
+		if token == panelToken then
+			panelHolder.Visible = false
+			if leaving then
+				leaving.holder.Visible = false
+				leaving.holder.GroupTransparency = 1
+			end
+		end
+	end)
+end
+
+--========================================================================
+-- THEME HOOKS FOR THE CORE
+--========================================================================
+Theme.bind(function(v, instant)
+	local d = instant and 0 or 0.35
+	setBarGrad(v.barTop, v.barBot, d)
+	setPanelGrad(v.panelTop, v.panelBot, d)
+	setProps(bar, d, { BackgroundTransparency = v.alpha })
+	setProps(panelBg, d, { BackgroundTransparency = math.max(0, v.alpha - 0.06) })
+	setProps(indicator, d, { BackgroundColor3 = v.accent })
+	indicatorAlpha = luma(v.accent) > 0.8 and 0.86 or 0.8
+	if active then
+		setProps(indicator, d, { BackgroundTransparency = indicatorAlpha })
+	end
+end)
+
+--========================================================================
+-- TAB SELECTION
+--========================================================================
+local function setActive(t)
+	local prev = active
+	active = t
+	for _, x in ipairs(TABS) do
+		refreshTab(x)
+	end
+	if t then
+		local pos = UDim2.fromOffset(t.x, M.Pad)
+		local size = UDim2.fromOffset(t.w, M.TabH)
+		if prev then
+			tween(indicator, 0.4, { Position = pos, Size = size })
+		else
+			indicator.Position = pos
+			indicator.Size = size
+		end
+		tween(indicator, 0.25, { BackgroundTransparency = indicatorAlpha })
+		tween(indicatorStroke, 0.25, { Transparency = 0 })
+		showPanel(t, prev ~= nil)
+	else
+		tween(indicator, 0.2, { BackgroundTransparency = 1 })
+		tween(indicatorStroke, 0.2, { Transparency = 1 })
+		hidePanel()
+	end
+end
+
+for _, t in ipairs(TABS) do
+	t.btn.MouseButton1Click:Connect(function()
+		if active == t then
+			setActive(nil)
+		else
+			setActive(t)
+		end
+	end)
+end
+
+--========================================================================
+-- MINIMIZE / SHOW-HIDE
+--========================================================================
+local minToken = 0
+local function setMinimized(m)
+	if m == state.minimized then
+		return
+	end
+	state.minimized = m
+	minToken += 1
+	local token = minToken
+	if m then
+		if active then
+			setActive(nil)
+		end
+	else
+		tabsClip.Visible = true
+	end
+	tween(barHolder, 0.55, { Size = UDim2.fromOffset(barWidth(m), M.BarH) })
+	tween(tabsClip, 0.55, {
+		Size = UDim2.fromOffset(m and 0 or tabsWidth, M.BarH),
+		GroupTransparency = m and 1 or 0,
+	})
+	tween(crossGroup, 0.35, { GroupTransparency = m and 1 or 0 })
+	tween(crossIcon.holder, 0.55, { Rotation = m and 90 or 0 }, Enum.EasingStyle.Back)
+	tween(logoGroup, 0.4, { GroupTransparency = m and 0 or 1 })
+	tween(logoScale, 0.55, { Scale = m and 1 or 0.5 }, Enum.EasingStyle.Back)
+	if m then
+		task.delay(0.56, function()
+			if token == minToken and state.minimized then
+				tabsClip.Visible = false
+			end
+		end)
+	end
+end
+
+crossBtn.MouseButton1Click:Connect(function()
+	setMinimized(not state.minimized)
+end)
+
+local showToken = 0
+local function setShown(v)
+	if v == state.shown then
+		return
+	end
+	state.shown = v
+	showToken += 1
+	local token = showToken
+	if v then
+		root.Visible = true
+		tween(root, 0.65, { Position = UDim2.fromOffset(0, 0) }, Enum.EasingStyle.Back, Enum.EasingDirection.Out)
+	else
+		local off = M.HideOffset * math.max(1, uiScaleValue)
+		tween(root, 0.45, { Position = UDim2.fromOffset(0, -off) }, Enum.EasingStyle.Quint, Enum.EasingDirection.In)
+		task.delay(0.46, function()
+			if token == showToken and not state.shown then
+				root.Visible = false
+			end
+		end)
+	end
+	if Snow.refresh then
+		Snow.refresh()
+	end
+end
+
+--========================================================================
+-- COMPONENTS  (grouped, iOS-style rows)
+--========================================================================
+local COMP = {}
+
+local function keyName(k)
+	return (k.Name:gsub("(%l)(%u)", "%1 %2"))
+end
+
+local function makeButton(parent, text, style, w, h, extra)
+	local props = {
+		Text = "",
+		AutoButtonColor = false,
+		Size = UDim2.fromOffset(w, h),
+		BackgroundColor3 = C.white,
+		BackgroundTransparency = 0.88,
+		BorderSizePixel = 0,
+		ZIndex = 3,
+	}
+	if extra then
+		for k, v in pairs(extra) do
+			props[k] = v
+		end
+	end
+	local b = new("TextButton", props, parent)
+	corner(b, h / 2)
+	local st = stroke(b, 0.9)
+	local txt = label({
+		Text = text,
+		Size = UDim2.fromScale(1, 1),
+		TextXAlignment = Enum.TextXAlignment.Center,
+		Font = Enum.Font.GothamSemibold,
+		TextSize = 13,
+	}, b)
+	local sc = new("UIScale", { Scale = 1 }, b)
+	local obj = { Button = b, style = style }
+	local BASE = { primary = 0, ghost = 0.88, danger = 0.82 }
+
+	local function paint(v, instant)
+		local d = instant and 0 or 0.25
+		if obj.style == "primary" then
+			setProps(b, d, { BackgroundColor3 = v.accent, BackgroundTransparency = 0 })
+			setProps(txt, d, { TextColor3 = v.onAccent })
+			st.Transparency = 1
+		elseif obj.style == "danger" then
+			setProps(b, d, { BackgroundColor3 = C.danger, BackgroundTransparency = 0.82 })
+			setProps(txt, d, { TextColor3 = C.danger })
+			st.Color = C.danger
+			st.Transparency = 0.65
+		else
+			setProps(b, d, { BackgroundColor3 = C.white, BackgroundTransparency = 0.88 })
+			setProps(txt, d, { TextColor3 = C.white })
+			st.Color = C.white
+			st.Transparency = 0.9
+		end
+	end
+	Theme.bind(paint)
+
+	b.MouseEnter:Connect(function()
+		tween(b, 0.15, { BackgroundTransparency = math.max(0, BASE[obj.style] - 0.1) })
+		tween(sc, 0.2, { Scale = 1.03 })
+	end)
+	b.MouseLeave:Connect(function()
+		tween(b, 0.2, { BackgroundTransparency = BASE[obj.style] })
+		tween(sc, 0.2, { Scale = 1 })
+	end)
+	b.MouseButton1Down:Connect(function()
+		tween(sc, 0.08, { Scale = 0.95 })
+	end)
+	b.MouseButton1Up:Connect(function()
+		tween(sc, 0.3, { Scale = 1.03 }, Enum.EasingStyle.Back)
+	end)
+
+	function obj.SetText(t)
+		txt.Text = t
+	end
+	function obj.SetStyle(s)
+		obj.style = s
+		paint(Theme.values, false)
+		tween(b, 0.2, { BackgroundTransparency = BASE[s] })
+	end
+	return obj
+end
+COMP.MakeButton = makeButton
+
+function COMP.Group(page, title)
+	local wrap = frame({
+		Size = UDim2.new(1, 0, 0, 0),
+		AutomaticSize = Enum.AutomaticSize.Y,
+		BackgroundTransparency = 1,
+		LayoutOrder = nextOrder(page),
+	}, page)
+	new("UIListLayout", { SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0, 7) }, wrap)
+	if title then
+		label({
+			Text = string.upper(title),
+			Size = UDim2.new(1, -8, 0, 14),
+			Position = UDim2.fromOffset(8, 0),
+			TextSize = 11,
+			Font = Enum.Font.GothamSemibold,
+			TextColor3 = C.sub,
+			LayoutOrder = 1,
+		}, wrap)
+	end
+	local box = frame({
+		Size = UDim2.new(1, 0, 0, 0),
+		AutomaticSize = Enum.AutomaticSize.Y,
+		BackgroundColor3 = C.white,
+		BackgroundTransparency = 0.3,
+		LayoutOrder = 2,
+	}, wrap)
+	corner(box, 16)
+	stroke(box, 0.93)
+	new("UIListLayout", { SortOrder = Enum.SortOrder.LayoutOrder }, box)
+	Theme.bind(function(v, instant)
+		setProps(box, instant and 0 or 0.35, { BackgroundColor3 = v.group })
+	end)
+	return { box = box, rows = {} }
+end
+
+local function newRow(g, height)
+	local r = new("Frame", {
+		Size = UDim2.new(1, 0, 0, height),
+		BackgroundTransparency = 1,
+		BorderSizePixel = 0,
+		LayoutOrder = nextOrder(g.box),
+	}, g.box)
+	local div = frame({
+		Position = UDim2.new(0, 16, 1, -1),
+		Size = UDim2.new(1, -16, 0, 1),
+		BackgroundColor3 = C.white,
+		BackgroundTransparency = 0.92,
+		ZIndex = 0,
+		Visible = false,
+	}, r)
+	local prev = g.rows[#g.rows]
+	if prev then
+		prev.div.Visible = true
+	end
+	table.insert(g.rows, { frame = r, div = div })
+	return r
+end
+
+local function rowLabel(r, text, desc, widthScale)
+	local ws = widthScale or 0.55
+	local title = label({
+		Text = text,
+		Position = desc and UDim2.fromOffset(16, 11) or UDim2.new(0, 16, 0.5, -9),
+		Size = UDim2.new(ws, 0, 0, 18),
+		TextTruncate = Enum.TextTruncate.AtEnd,
+	}, r)
+	local d
+	if desc then
+		d = label({
+			Text = desc,
+			Position = UDim2.fromOffset(16, 30),
+			Size = UDim2.new(ws, 0, 0, 14),
+			TextSize = 12,
+			TextColor3 = C.sub,
+			TextTruncate = Enum.TextTruncate.AtEnd,
+		}, r)
+	end
+	return title, d
+end
+
+-- ---------------------------------------------------------------- toggle
+function COMP.Toggle(g, o)
+	local r = newRow(g, o.desc and 60 or 52)
+	rowLabel(r, o.text, o.desc, 0.62)
+	local hit = new("TextButton", {
+		Text = "",
+		BackgroundTransparency = 1,
+		Size = UDim2.fromScale(1, 1),
+		AutoButtonColor = false,
+		BorderSizePixel = 0,
+		ZIndex = 1,
+	}, r)
+	local track = frame({
+		AnchorPoint = Vector2.new(1, 0.5),
+		Position = UDim2.new(1, -16, 0.5, 0),
+		Size = UDim2.fromOffset(44, 26),
+		BackgroundColor3 = C.white,
+		BackgroundTransparency = 0.82,
+		ZIndex = 2,
+	}, r)
+	corner(track, 13)
+	local knob = frame({
+		AnchorPoint = Vector2.new(0, 0.5),
+		Position = UDim2.new(0, 3, 0.5, 0),
+		Size = UDim2.fromOffset(20, 20),
+		BackgroundColor3 = C.white,
+		ZIndex = 3,
+	}, track)
+	corner(knob, 10)
+
+	local on = o.default == true
+	local accent = Theme.values.accent
+	local function render(animate)
+		local d = animate and 0.3 or 0
+		if on then
+			setProps(track, d, { BackgroundColor3 = accent, BackgroundTransparency = 0 })
+			setProps(knob, d, {
+				Position = UDim2.new(0, 21, 0.5, 0),
+				Size = UDim2.fromOffset(20, 20),
+				BackgroundColor3 = luma(accent) > 0.6 and C.dark or C.white,
+			}, Enum.EasingStyle.Back)
+		else
+			setProps(track, d, { BackgroundColor3 = C.white, BackgroundTransparency = 0.82 })
+			setProps(knob, d, {
+				Position = UDim2.new(0, 3, 0.5, 0),
+				Size = UDim2.fromOffset(20, 20),
+				BackgroundColor3 = C.white,
+			}, Enum.EasingStyle.Back)
+		end
+	end
+	Theme.bind(function(v, instant)
+		accent = v.accent
+		render(not instant)
+	end)
+
+	hit.MouseButton1Down:Connect(function()
+		tween(knob, 0.12, {
+			Size = UDim2.fromOffset(25, 20),
+			Position = on and UDim2.new(0, 16, 0.5, 0) or UDim2.new(0, 3, 0.5, 0),
+		})
+	end)
+	hit.MouseLeave:Connect(function()
+		render(true)
+	end)
+	hit.MouseButton1Click:Connect(function()
+		on = not on
+		render(true)
+		if o.callback then
+			o.callback(on)
+		end
+	end)
+
+	local api = { Row = r }
+	function api.Get()
+		return on
+	end
+	function api.Set(v, silent)
+		on = v == true
+		render(true)
+		if not silent and o.callback then
+			o.callback(on)
+		end
+	end
+	return api
+end
+
+-- ---------------------------------------------------------------- slider
+function COMP.Slider(g, o)
+	local min, max, step = o.min, o.max, o.step or 1
+	local r = newRow(g, 64)
+	rowLabel(r, o.text, nil, 0.6)
+	local valueLabel = label({
+		AnchorPoint = Vector2.new(1, 0),
+		Position = UDim2.new(1, -16, 0, 10),
+		Size = UDim2.fromOffset(110, 18),
+		TextXAlignment = Enum.TextXAlignment.Right,
+		TextColor3 = C.sub,
+		TextSize = 13,
+	}, r)
+	valueLabel.Position = UDim2.new(1, -16, 0, 10)
+
+	local hit = new("TextButton", {
+		Text = "",
+		BackgroundTransparency = 1,
+		AutoButtonColor = false,
+		BorderSizePixel = 0,
+		Position = UDim2.new(0, 16, 0, 34),
+		Size = UDim2.new(1, -32, 0, 22),
+		ZIndex = 2,
+	}, r)
+	local track = frame({
+		AnchorPoint = Vector2.new(0, 0.5),
+		Position = UDim2.new(0, 0, 0.5, 0),
+		Size = UDim2.new(1, 0, 0, 4),
+		BackgroundColor3 = C.white,
+		BackgroundTransparency = 0.84,
+	}, hit)
+	corner(track, 2)
+	local fill = frame({ Size = UDim2.fromScale(0, 1), BackgroundColor3 = C.white }, track)
+	corner(fill, 2)
+	local knob = frame({
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		Position = UDim2.fromScale(0, 0.5),
+		Size = UDim2.fromOffset(14, 14),
+		BackgroundColor3 = C.white,
+		ZIndex = 3,
+	}, track)
+	corner(knob, 7)
+	stroke(knob, 0.7, C.black, 1)
+
+	local fmt = o.format
+		or function(v)
+			if step >= 1 then
+				return tostring(math.floor(v + 0.5)) .. (o.suffix or "")
+			end
+			return string.format("%.2f", v) .. (o.suffix or "")
+		end
+	local value = math.clamp(o.default or min, min, max)
+
+	local function render(animate)
+		local f = (value - min) / (max - min)
+		local d = animate and 0.2 or 0
+		setProps(fill, d, { Size = UDim2.fromScale(f, 1) })
+		setProps(knob, d, { Position = UDim2.fromScale(f, 0.5) })
+		valueLabel.Text = fmt(value)
+	end
+	Theme.bind(function(v, instant)
+		setProps(fill, instant and 0 or 0.3, { BackgroundColor3 = v.accent })
+	end)
+	render(false)
+
+	local function fromX(x)
+		local ap, as = track.AbsolutePosition.X, track.AbsoluteSize.X
+		local f = math.clamp((x - ap) / math.max(as, 1), 0, 1)
+		local v = min + f * (max - min)
+		v = math.floor((v - min) / step + 0.5) * step + min
+		v = tonumber(string.format("%.4f", math.clamp(v, min, max)))
+		if v ~= value then
+			value = v
+			render(false)
+			if o.callback then
+				o.callback(value)
+			end
+		end
+	end
+	dragArea(hit, fromX, function()
+		tween(knob, 0.12, { Size = UDim2.fromOffset(18, 18) })
+	end, function()
+		tween(knob, 0.25, { Size = UDim2.fromOffset(14, 14) }, Enum.EasingStyle.Back)
+	end)
+
+	local api = { Row = r }
+	function api.Get()
+		return value
+	end
+	function api.Set(v, silent)
+		value = math.clamp(v, min, max)
+		render(true)
+		if not silent and o.callback then
+			o.callback(value)
+		end
+	end
+	return api
+end
+
+-- -------------------------------------------------------------- dropdown
+function COMP.Dropdown(g, o)
+	local opts = o.options
+	local OPT_H = 38
+	local full = 52 + #opts * OPT_H + 8
+	local r = newRow(g, 52)
+	r.ClipsDescendants = true
+	local header = new("TextButton", {
+		Text = "",
+		BackgroundTransparency = 1,
+		AutoButtonColor = false,
+		BorderSizePixel = 0,
+		Size = UDim2.new(1, 0, 0, 52),
+		ZIndex = 1,
+	}, r)
+	rowLabel(r, o.text, nil, 0.4)
+
+	local pill = frame({
+		AnchorPoint = Vector2.new(1, 0.5),
+		Position = UDim2.new(1, -16, 0, 26),
+		Size = UDim2.fromOffset(160, 32),
+		BackgroundColor3 = C.white,
+		BackgroundTransparency = 0.9,
+		ZIndex = 2,
+	}, r)
+	corner(pill, 16)
+	stroke(pill, 0.9)
+	local valueLabel = label({
+		Position = UDim2.fromOffset(14, 0),
+		Size = UDim2.new(1, -40, 1, 0),
+		TextSize = 13,
+		TextTruncate = Enum.TextTruncate.AtEnd,
+	}, pill)
+	local chev = buildIcon("chevron", 14, pill, C.sub)
+	chev.holder.Position = UDim2.new(1, -18, 0.5, 0)
+
+	local list = frame({
+		Position = UDim2.fromOffset(0, 52),
+		Size = UDim2.new(1, 0, 0, #opts * OPT_H),
+		BackgroundTransparency = 1,
+	}, r)
+
+	local selected = o.default or opts[1]
+	local items = {}
+	local isOpen = false
+
+	local function renderSelected()
+		valueLabel.Text = tostring(selected)
+		for name, it in pairs(items) do
+			it.check.holder.Visible = name == selected
+			tween(it.text, 0.2, { TextColor3 = name == selected and C.white or C.hover })
+		end
+	end
+
+	for i, name in ipairs(opts) do
+		local b = new("TextButton", {
+			Text = "",
+			BackgroundTransparency = 1,
+			AutoButtonColor = false,
+			BorderSizePixel = 0,
+			Position = UDim2.fromOffset(0, (i - 1) * OPT_H),
+			Size = UDim2.new(1, 0, 0, OPT_H),
+		}, list)
+		local hl = frame({
+			Position = UDim2.fromOffset(8, 2),
+			Size = UDim2.new(1, -16, 1, -4),
+			BackgroundColor3 = C.white,
+			BackgroundTransparency = 1,
+		}, b)
+		corner(hl, 10)
+		local txt = label({
+			Text = name,
+			Position = UDim2.fromOffset(20, 0),
+			Size = UDim2.new(1, -60, 1, 0),
+			TextSize = 13,
+			TextColor3 = C.hover,
+		}, b)
+		local check = buildIcon("check", 16, b, Theme.values.accent)
+		check.holder.Position = UDim2.new(1, -26, 0.5, 0)
+		check.holder.Visible = false
+		Theme.bind(function(v)
+			check.SetColor(v.accent, 0)
+		end)
+		hoverable(b, hl, 1, 0.94, 0.88)
+		items[name] = { text = txt, check = check }
+		b.MouseButton1Click:Connect(function()
+			selected = name
+			renderSelected()
+			if o.callback then
+				o.callback(name)
+			end
+		end)
+	end
+	renderSelected()
+
+	local function setOpen(v)
+		isOpen = v
+		tween(r, 0.38, { Size = UDim2.new(1, 0, 0, v and full or 52) })
+		tween(chev.holder, 0.38, { Rotation = v and 180 or 0 }, Enum.EasingStyle.Back)
+	end
+	header.MouseButton1Click:Connect(function()
+		setOpen(not isOpen)
+	end)
+
+	local api = { Row = r }
+	function api.Get()
+		return selected
+	end
+	function api.Set(name, silent)
+		selected = name
+		renderSelected()
+		if not silent and o.callback then
+			o.callback(name)
+		end
+	end
+	return api
+end
+
+-- ------------------------------------------------------------- segmented
+function COMP.Segmented(g, o)
+	local opts = o.options
+	local n = #opts
+	local r = newRow(g, 84)
+	rowLabel(r, o.text, nil, 0.6)
+	local barF = frame({
+		Position = UDim2.new(0, 16, 0, 40),
+		Size = UDim2.new(1, -32, 0, 34),
+		BackgroundColor3 = C.black,
+		BackgroundTransparency = 0.62,
+	}, r)
+	corner(barF, 17)
+	stroke(barF, 0.92)
+	local ind = frame({
+		Position = UDim2.new(0, 3, 0, 3),
+		Size = UDim2.new(1 / n, -6, 1, -6),
+		BackgroundColor3 = C.white,
+		BackgroundTransparency = 0.84,
+		ZIndex = 2,
+	}, barF)
+	corner(ind, 14)
+	local indStroke = stroke(ind, 0.8)
+	Theme.bind(function(v, instant)
+		local d = instant and 0 or 0.3
+		setProps(ind, d, { BackgroundColor3 = v.accent, BackgroundTransparency = luma(v.accent) > 0.8 and 0.84 or 0.78 })
+		setProps(indStroke, d, { Color = v.accent })
+	end)
+
+	local selected = o.default or opts[1]
+	local buttons = {}
+	local function render(animate)
+		for i, name in ipairs(opts) do
+			if name == selected then
+				local pos = UDim2.new((i - 1) / n, 3, 0, 3)
+				setProps(ind, animate and 0.4 or 0, { Position = pos })
+			end
+			tween(buttons[name], 0.2, { TextColor3 = name == selected and C.white or C.sub })
+		end
+	end
+	for i, name in ipairs(opts) do
+		local b = new("TextButton", {
+			Text = name,
+			AutoButtonColor = false,
+			BackgroundTransparency = 1,
+			BorderSizePixel = 0,
+			Position = UDim2.new((i - 1) / n, 0, 0, 0),
+			Size = UDim2.new(1 / n, 0, 1, 0),
+			Font = Enum.Font.GothamMedium,
+			TextSize = 13,
+			TextColor3 = C.sub,
+			ZIndex = 3,
+		}, barF)
+		buttons[name] = b
+		b.MouseButton1Click:Connect(function()
+			selected = name
+			render(true)
+			if o.callback then
+				o.callback(name)
+			end
+		end)
+	end
+	render(false)
+
+	local api = { Row = r }
+	function api.Get()
+		return selected
+	end
+	function api.Set(name, silent)
+		selected = name
+		render(true)
+		if not silent and o.callback then
+			o.callback(name)
+		end
+	end
+	function api.Clear()
+		selected = nil
+		for _, b in pairs(buttons) do
+			tween(b, 0.2, { TextColor3 = C.sub })
+		end
+	end
+	return api
+end
+
+-- --------------------------------------------------------------- swatches
+function COMP.Swatches(g, o)
+	local r = newRow(g, 94)
+	rowLabel(r, o.text, nil, 0.5)
+	local nameLabel = label({
+		AnchorPoint = Vector2.new(1, 0),
+		Position = UDim2.new(1, -16, 0, 17),
+		Size = UDim2.fromOffset(120, 18),
+		TextXAlignment = Enum.TextXAlignment.Right,
+		TextColor3 = C.sub,
+		TextSize = 13,
+	}, r)
+	local row = frame({
+		Position = UDim2.fromOffset(16, 46),
+		Size = UDim2.new(1, -32, 0, 38),
+		BackgroundTransparency = 1,
+	}, r)
+	new("UIListLayout", {
+		FillDirection = Enum.FillDirection.Horizontal,
+		Padding = UDim.new(0, 10),
+		VerticalAlignment = Enum.VerticalAlignment.Center,
+	}, row)
+
+	local selected = o.default
+	local chips = {}
+	local function render()
+		nameLabel.Text = selected or "Custom"
+		for name, c in pairs(chips) do
+			local on = name == selected
+			tween(c.ring, 0.25, { Transparency = on and 0 or 1 })
+			tween(c.scale, 0.35, { Scale = on and 1 or 0.9 }, Enum.EasingStyle.Back)
+		end
+	end
+	for _, item in ipairs(o.items) do
+		local b = new("TextButton", {
+			Text = "",
+			AutoButtonColor = false,
+			BackgroundTransparency = 1,
+			BorderSizePixel = 0,
+			Size = UDim2.fromOffset(38, 38),
+		}, row)
+		local sc = new("UIScale", { Scale = 0.9 }, b)
+		local ringF = frame({ Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1 }, b)
+		corner(ringF, 19)
+		local ring = stroke(ringF, 1, C.white, 2)
+		local inner = frame({
+			AnchorPoint = Vector2.new(0.5, 0.5),
+			Position = UDim2.fromScale(0.5, 0.5),
+			Size = UDim2.fromOffset(28, 28),
+			BackgroundColor3 = C.white,
+		}, b)
+		corner(inner, 14)
+		new("UIGradient", { Rotation = 45, Color = ColorSequence.new(item.color1, item.color2) }, inner)
+		chips[item.name] = { ring = ring, scale = sc }
+		b.MouseEnter:Connect(function()
+			if selected ~= item.name then
+				tween(sc, 0.2, { Scale = 1 })
+			end
+		end)
+		b.MouseLeave:Connect(function()
+			if selected ~= item.name then
+				tween(sc, 0.2, { Scale = 0.9 })
+			end
+		end)
+		b.MouseButton1Click:Connect(function()
+			selected = item.name
+			render()
+			if o.callback then
+				o.callback(item.name)
+			end
+		end)
+	end
+	render()
+
+	local api = { Row = r }
+	function api.Set(name)
+		selected = name
+		render()
+	end
+	return api
+end
+
+-- ----------------------------------------------------------- colour picker
+function COMP.ColorPicker(g, o)
+	local r = newRow(g, 52)
+	r.ClipsDescendants = true
+	local OPEN_H = 52 + 156
+	local header = new("TextButton", {
+		Text = "",
+		BackgroundTransparency = 1,
+		AutoButtonColor = false,
+		BorderSizePixel = 0,
+		Size = UDim2.new(1, 0, 0, 52),
+		ZIndex = 1,
+	}, r)
+	rowLabel(r, o.text, nil, 0.6)
+
+	local h, s, v = (o.default or C.white):ToHSV()
+	local swatch = frame({
+		AnchorPoint = Vector2.new(1, 0.5),
+		Position = UDim2.new(1, -16, 0, 26),
+		Size = UDim2.fromOffset(30, 30),
+		BackgroundColor3 = o.default or C.white,
+		ZIndex = 2,
+	}, r)
+	corner(swatch, 15)
+	stroke(swatch, 0.6)
+
+	local area = frame({
+		Position = UDim2.fromOffset(0, 52),
+		Size = UDim2.new(1, 0, 0, 148),
+		BackgroundTransparency = 1,
+	}, r)
+
+	local sv = frame({
+		Position = UDim2.fromOffset(16, 4),
+		Size = UDim2.new(1, -32, 0, 104),
+		BackgroundColor3 = Color3.fromHSV(h, 1, 1),
+	}, area)
+	corner(sv, 10)
+	local whiteL = frame({ Size = UDim2.fromScale(1, 1), BackgroundColor3 = C.white }, sv)
+	corner(whiteL, 10)
+	new("UIGradient", {
+		Transparency = NumberSequence.new({ NumberSequenceKeypoint.new(0, 0), NumberSequenceKeypoint.new(1, 1) }),
+	}, whiteL)
+	local blackL = frame({ Size = UDim2.fromScale(1, 1), BackgroundColor3 = C.black }, sv)
+	corner(blackL, 10)
+	new("UIGradient", {
+		Rotation = 90,
+		Transparency = NumberSequence.new({ NumberSequenceKeypoint.new(0, 1), NumberSequenceKeypoint.new(1, 0) }),
+	}, blackL)
+	local svKnob = frame({
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		Size = UDim2.fromOffset(16, 16),
+		BackgroundTransparency = 1,
+		ZIndex = 3,
+	}, sv)
+	corner(svKnob, 8)
+	stroke(svKnob, 0, C.white, 2)
+
+	local hue = frame({
+		Position = UDim2.fromOffset(16, 120),
+		Size = UDim2.new(1, -32, 0, 14),
+		BackgroundColor3 = C.white,
+	}, area)
+	corner(hue, 7)
+	new("UIGradient", {
+		Color = ColorSequence.new({
+			ColorSequenceKeypoint.new(0, rgb(255, 0, 0)),
+			ColorSequenceKeypoint.new(1 / 6, rgb(255, 255, 0)),
+			ColorSequenceKeypoint.new(2 / 6, rgb(0, 255, 0)),
+			ColorSequenceKeypoint.new(3 / 6, rgb(0, 255, 255)),
+			ColorSequenceKeypoint.new(4 / 6, rgb(0, 0, 255)),
+			ColorSequenceKeypoint.new(5 / 6, rgb(255, 0, 255)),
+			ColorSequenceKeypoint.new(1, rgb(255, 0, 0)),
+		}),
+	}, hue)
+	local hueKnob = frame({
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		Size = UDim2.fromOffset(18, 18),
+		BackgroundColor3 = C.white,
+		ZIndex = 3,
+	}, hue)
+	corner(hueKnob, 9)
+	stroke(hueKnob, 0.6, C.black, 1)
+
+	local function apply(fire)
+		local c = Color3.fromHSV(h, s, v)
+		swatch.BackgroundColor3 = c
+		sv.BackgroundColor3 = Color3.fromHSV(h, 1, 1)
+		svKnob.Position = UDim2.fromScale(s, 1 - v)
+		hueKnob.Position = UDim2.fromScale(h, 0.5)
+		if fire and o.callback then
+			o.callback(c)
+		end
+	end
+	apply(false)
+
+	local svHit = new("TextButton", {
+		Text = "",
+		BackgroundTransparency = 1,
+		AutoButtonColor = false,
+		BorderSizePixel = 0,
+		Size = UDim2.fromScale(1, 1),
+		ZIndex = 4,
+	}, sv)
+	dragArea(svHit, function(x, y)
+		s = math.clamp((x - sv.AbsolutePosition.X) / math.max(sv.AbsoluteSize.X, 1), 0, 1)
+		v = 1 - math.clamp((y - sv.AbsolutePosition.Y) / math.max(sv.AbsoluteSize.Y, 1), 0, 1)
+		apply(true)
+	end)
+	local hueHit = new("TextButton", {
+		Text = "",
+		BackgroundTransparency = 1,
+		AutoButtonColor = false,
+		BorderSizePixel = 0,
+		Size = UDim2.new(1, 0, 0, 26),
+		Position = UDim2.fromOffset(0, -6),
+		ZIndex = 4,
+	}, hue)
+	dragArea(hueHit, function(x)
+		h = math.clamp((x - hue.AbsolutePosition.X) / math.max(hue.AbsoluteSize.X, 1), 0, 0.999)
+		apply(true)
+	end)
+
+	local isOpen = false
+	header.MouseButton1Click:Connect(function()
+		isOpen = not isOpen
+		tween(r, 0.4, { Size = UDim2.new(1, 0, 0, isOpen and OPEN_H or 52) })
+	end)
+
+	local api = { Row = r }
+	function api.Get()
+		return Color3.fromHSV(h, s, v)
+	end
+	function api.Set(c, silent)
+		h, s, v = c:ToHSV()
+		apply(not silent)
+	end
+	return api
+end
+
+-- ----------------------------------------------------------------- keybind
+function COMP.Keybind(g, o)
+	local r = newRow(g, 52)
+	rowLabel(r, o.text, nil, 0.5)
+	local key = o.default
+	local btn = makeButton(r, keyName(key), "ghost", 140, 32, {
+		AnchorPoint = Vector2.new(1, 0.5),
+		Position = UDim2.new(1, -16, 0.5, 0),
+	})
+	btn.Button.MouseButton1Click:Connect(function()
+		if state.listening then
+			return
+		end
+		state.listening = true
+		btn.SetText("Press a key...")
+		local conn
+		conn = UserInputService.InputBegan:Connect(function(input)
+			if input.UserInputType ~= Enum.UserInputType.Keyboard then
+				return
+			end
+			conn:Disconnect()
+			task.delay(0.1, function()
+				state.listening = false
+			end)
+			if input.KeyCode ~= Enum.KeyCode.Escape then
+				key = input.KeyCode
+				if o.callback then
+					o.callback(key)
+				end
+			end
+			btn.SetText(keyName(key))
+		end)
+	end)
+	return { Row = r }
+end
+
+-- ------------------------------------------------------------- text input
+function COMP.Input(g, o)
+	local r = newRow(g, 94)
+	rowLabel(r, o.text, o.desc, 0.9)
+	local barF = frame({
+		Position = UDim2.fromOffset(16, 48),
+		Size = UDim2.new(1, -(32 + 96), 0, 34),
+		BackgroundColor3 = C.black,
+		BackgroundTransparency = 0.6,
+	}, r)
+	corner(barF, 12)
+	local bs = stroke(barF, 0.9)
+	local box = new("TextBox", {
+		BackgroundTransparency = 1,
+		BorderSizePixel = 0,
+		Position = UDim2.fromOffset(14, 0),
+		Size = UDim2.new(1, -28, 1, 0),
+		Text = "",
+		PlaceholderText = o.placeholder or "",
+		PlaceholderColor3 = C.sub,
+		TextColor3 = C.white,
+		TextSize = 13,
+		Font = Enum.Font.GothamMedium,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		ClearTextOnFocus = false,
+	}, barF)
+	box.Focused:Connect(function()
+		tween(bs, 0.2, { Transparency = 0.5 })
+	end)
+	box.FocusLost:Connect(function()
+		tween(bs, 0.2, { Transparency = 0.9 })
+	end)
+	local btn = makeButton(r, o.buttonText or "Apply", "primary", 88, 34, {
+		AnchorPoint = Vector2.new(1, 0),
+		Position = UDim2.new(1, -16, 0, 48),
+	})
+	btn.Button.MouseButton1Click:Connect(function()
+		if o.callback then
+			o.callback(box.Text)
+		end
+	end)
+	return { Row = r, Box = box }
+end
+
+-- ------------------------------------------------------------ button row
+function COMP.Button(g, o)
+	local r = newRow(g, o.desc and 60 or 52)
+	rowLabel(r, o.text, o.desc, 0.6)
+	local btn = makeButton(r, o.buttonText or "Run", o.style or "ghost", o.width or 100, 32, {
+		AnchorPoint = Vector2.new(1, 0.5),
+		Position = UDim2.new(1, -16, 0.5, 0),
+	})
+	btn.Button.MouseButton1Click:Connect(function()
+		if o.callback then
+			o.callback(btn)
+		end
+	end)
+	return { Row = r, Button = btn }
+end
+
+--========================================================================
+-- CONFIG HOOKS
+-- Components created with a `key` register themselves with the config
+-- store (Cfg) and tell it when they change (autosave). Options understood:
+--   key       config key to save under
+--   noConfig  opt out even if a key is given
+--   noReset   keep the current value when an imported config omits this key
+--   skip      function; return true to leave this key out of exports
+--   noExport  never export this key
+-- The wrappers below sit on top of the components above, which are untouched.
+--========================================================================
+do
+	local function keyed(o)
+		return o.key ~= nil and not o.noConfig
+	end
+
+	-- copy of the options whose callback also tracks / flags changes for autosave
+	local function hook(o, track)
+		local k = keyed(o)
+		if not k and not track then
+			return o
+		end
+		local copy = {}
+		for key, value in pairs(o) do
+			copy[key] = value
+		end
+		local cb = o.callback
+		copy.callback = function(...)
+			if track then
+				track(...)
+			end
+			if cb then
+				cb(...)
+			end
+			if k then
+				Cfg.dirty()
+			end
+		end
+		return copy
+	end
+
+	-- get() returns a JSON-safe value, set(v) applies one (and fires the component's callback)
+	local function register(o, get, set)
+		if not keyed(o) then
+			return
+		end
+		Cfg.add(o.key, get, function(v)
+			if get() ~= v then
+				set(v)
+			end
+		end, {
+			-- a conditionally exported key (skip) being absent doesn't mean "reset it"
+			noReset = o.noReset or o.skip ~= nil,
+			skip = o.skip,
+			noExport = o.noExport,
+		})
+	end
+
+	local rawToggle = COMP.Toggle
+	function COMP.Toggle(g, o)
+		local api = rawToggle(g, hook(o))
+		register(o, api.Get, function(v)
+			api.Set(v == true)
+		end)
+		return api
+	end
+
+	local rawSlider = COMP.Slider
+	function COMP.Slider(g, o)
+		local api = rawSlider(g, hook(o))
+		register(o, api.Get, function(v)
+			if type(v) == "number" then
+				api.Set(v)
+			end
+		end)
+		return api
+	end
+
+	local rawDropdown = COMP.Dropdown
+	function COMP.Dropdown(g, o)
+		local api = rawDropdown(g, hook(o))
+		register(o, api.Get, function(v)
+			if table.find(o.options, v) then
+				api.Set(v)
+			end
+		end)
+		return api
+	end
+
+	local rawSegmented = COMP.Segmented
+	function COMP.Segmented(g, o)
+		local api = rawSegmented(g, hook(o))
+		register(o, api.Get, function(v)
+			if table.find(o.options, v) then
+				api.Set(v)
+			end
+		end)
+		return api
+	end
+
+	-- swatches have no getter of their own, so track the selection here
+	local rawSwatches = COMP.Swatches
+	function COMP.Swatches(g, o)
+		local cur = o.default
+		local cb = o.callback
+		local valid = {}
+		for _, item in ipairs(o.items) do
+			valid[item.name] = true
+		end
+		local api = rawSwatches(
+			g,
+			hook(o, function(name)
+				cur = name
+			end)
+		)
+		local rawSet = api.Set
+		function api.Set(name)
+			cur = name
+			rawSet(name)
+		end
+		function api.Get()
+			return cur
+		end
+		register(o, api.Get, function(v)
+			if valid[v] then
+				api.Set(v)
+				if cb then
+					cb(v)
+				end
+			end
+		end)
+		return api
+	end
+
+	-- colours are stored as hex strings so they survive JSON
+	local rawPicker = COMP.ColorPicker
+	function COMP.ColorPicker(g, o)
+		local api = rawPicker(g, hook(o))
+		register(o, function()
+			return toHex(api.Get())
+		end, function(hex)
+			local c = type(hex) == "string" and fromHex(hex)
+			if c then
+				api.Set(c)
+			end
+		end)
+		return api
+	end
+
+	-- keybinds are stored by KeyCode name
+	local rawKeybind = COMP.Keybind
+	function COMP.Keybind(g, o)
+		local cur = o.default
+		local api = rawKeybind(
+			g,
+			hook(o, function(k)
+				cur = k
+			end)
+		)
+		local btn = api.Row:FindFirstChildOfClass("TextButton")
+		local lbl = btn and btn:FindFirstChildOfClass("TextLabel")
+		if lbl then
+			-- keep the button text matching the real key (e.g. after Escape-cancelling a rebind
+			-- once a config has changed the key)
+			lbl:GetPropertyChangedSignal("Text"):Connect(function()
+				local want = keyName(cur)
+				if lbl.Text ~= want and lbl.Text ~= "Press a key..." then
+					lbl.Text = want
+				end
+			end)
+		end
+		function api.Get()
+			return cur
+		end
+		function api.Set(k, silent)
+			cur = k
+			if lbl then
+				lbl.Text = keyName(k)
+			end
+			if not silent and o.callback then
+				o.callback(k)
+			end
+		end
+		register(o, function()
+			return cur.Name
+		end, function(name)
+			local ok, k = pcall(function()
+				return Enum.KeyCode[name]
+			end)
+			if ok and typeof(k) == "EnumItem" then
+				api.Set(k)
+			end
+		end)
+		return api
+	end
+end
+
+--========================================================================
+-- FPS / PING HUD
+--========================================================================
+local hudPill = new("Frame", {
+	Name = "FpsPill",
+	Position = UDim2.fromOffset(14, 60),
+	Size = UDim2.fromOffset(0, 0),
+	AutomaticSize = Enum.AutomaticSize.XY,
+	BackgroundColor3 = C.black,
+	BackgroundTransparency = 1,
+	BorderSizePixel = 0,
+	Visible = false,
+}, hudLayer)
+corner(hudPill, 13)
+local hudStroke = stroke(hudPill, 1)
+new("UIPadding", {
+	PaddingLeft = UDim.new(0, 12),
+	PaddingRight = UDim.new(0, 12),
+	PaddingTop = UDim.new(0, 7),
+	PaddingBottom = UDim.new(0, 7),
+}, hudPill)
+local hudText = label({
+	Text = "-- FPS",
+	Size = UDim2.fromOffset(0, 0),
+	AutomaticSize = Enum.AutomaticSize.XY,
+	Font = Enum.Font.GothamSemibold,
+	TextSize = 12,
+	TextTransparency = 1,
+}, hudPill)
+
+function Hud.set(on)
+	if on == Hud.on then
+		return
+	end
+	Hud.on = on
+	if Hud.conn then
+		Hud.conn:Disconnect()
+		Hud.conn = nil
+	end
+	if on then
+		hudPill.Visible = true
+		tween(hudPill, 0.3, { BackgroundTransparency = 0.4 })
+		tween(hudStroke, 0.3, { Transparency = 0.88 })
+		tween(hudText, 0.3, { TextTransparency = 0 })
+		local frames, acc = 0, 0
+		Hud.conn = RunService.RenderStepped:Connect(function(dt)
+			frames += 1
+			acc += dt
+			if acc >= 0.5 then
+				local fps = math.floor(frames / acc + 0.5)
+				frames, acc = 0, 0
+				local ok, ping = pcall(function()
+					return Stats.Network.ServerStatsItem["Data Ping"]:GetValue()
+				end)
+				local txt = fps .. " FPS"
+				if ok and ping then
+					txt = txt .. "  |  " .. math.floor(ping + 0.5) .. " ms"
+				end
+				hudText.Text = txt
+			end
+		end)
+	else
+		tween(hudPill, 0.25, { BackgroundTransparency = 1 })
+		tween(hudStroke, 0.25, { Transparency = 1 })
+		tween(hudText, 0.25, { TextTransparency = 1 })
+		task.delay(0.27, function()
+			if not Hud.on then
+				hudPill.Visible = false
+			end
+		end)
+	end
+end
+onUnload(function()
+	Hud.set(false)
+end)
+
+--========================================================================
+-- SNOW
+--========================================================================
+Snow.enabled = false
+Snow.amount = 0.5
+Snow.speed = 1
+Snow.max = 150
+Snow.particles = {}
+
+function Snow.build(n)
+	while #Snow.particles < n do
+		local size = math.random(2, 6)
+		local f = frame({
+			AnchorPoint = Vector2.new(0.5, 0.5),
+			Size = UDim2.fromOffset(size, size),
+			BackgroundColor3 = C.white,
+			BackgroundTransparency = 0.1 + math.random() * 0.45,
+			Visible = false,
+		}, snowLayer)
+		corner(f, 99)
+		table.insert(Snow.particles, {
+			f = f,
+			x = math.random(),
+			y = math.random(),
+			sp = 0.035 + size * 0.012 + math.random() * 0.03,
+			ph = math.random() * 6.28,
+		})
+	end
+end
+
+function Snow.step(dt)
+	local count = math.floor(Snow.max * Snow.amount + 0.5)
+	local t = os.clock()
+	for i, p in ipairs(Snow.particles) do
+		if i <= count then
+			p.f.Visible = true
+			p.y += p.sp * dt * Snow.speed
+			if p.y > 1.03 then
+				p.y = -0.03
+				p.x = math.random()
+			end
+			p.f.Position = UDim2.fromScale(p.x + math.sin(t * 0.8 + p.ph) * 0.012, p.y)
+		else
+			p.f.Visible = false
+		end
+	end
+end
+
+function Snow.refresh()
+	local want = Snow.enabled and state.shown and not unloaded
+	if want and not Snow.conn then
+		Snow.build(math.floor(Snow.max * Snow.amount + 0.5))
+		snowLayer.Visible = true
+		Snow.conn = RunService.RenderStepped:Connect(Snow.step)
+	elseif not want and Snow.conn then
+		Snow.conn:Disconnect()
+		Snow.conn = nil
+		snowLayer.Visible = false
+	end
+end
+onUnload(function()
+	if Snow.conn then
+		Snow.conn:Disconnect()
+		Snow.conn = nil
+	end
+end)
+
+--========================================================================
+-- PERFORMANCE
+--========================================================================
+local Perf = { orig = {}, fps = { uncap = false, limit = 60 }, worldState = {} }
+
+local function fpsSetter()
+	if type(setfpscap) == "function" then
+		return setfpscap
+	end
+	if type(set_fps_cap) == "function" then
+		return set_fps_cap
+	end
+	if syn and type(syn.set_fps_cap) == "function" then
+		return syn.set_fps_cap
+	end
+	return nil
+end
+
+-- returns the method that worked ("setfpscap" / "fflag") or nil
+function Perf.applyFps()
+	if Perf.origFps == nil then
+		local ok, v = false, nil
+		if type(getfpscap) == "function" then
+			ok, v = pcall(getfpscap)
+		end
+		Perf.origFps = (ok and type(v) == "number" and v > 0) and v or 60
+	end
+	local target = Perf.fps.uncap and 1000 or Perf.fps.limit
+	local fn = fpsSetter()
+	if fn and pcall(fn, target) then
+		return "setfpscap"
+	end
+	if type(setfflag) == "function" then
+		local a = pcall(setfflag, "TaskSchedulerTargetFps", tostring(target))
+		local b = pcall(setfflag, "DFIntTaskSchedulerTargetFps", tostring(target))
+		if a or b then
+			return "fflag"
+		end
+	end
+	return nil
+end
+
+-- average rendered FPS over `sec` seconds
+function Perf.measure(sec)
+	local frames, t = 0, 0
+	local conn = RunService.RenderStepped:Connect(function(dt)
+		frames += 1
+		t += dt
+	end)
+	task.wait(sec)
+	conn:Disconnect()
+	return t > 0 and math.floor(frames / t + 0.5) or 0
+end
+
+-- Roblox / games sometimes reset the cap, so keep re-applying while uncapped
+do
+	local acc = 0
+	bindConn(RunService.Heartbeat, function(dt)
+		if not Perf.fps.uncap then
+			return
+		end
+		acc += dt
+		if acc >= 4 then
+			acc = 0
+			Perf.applyFps()
+		end
+	end)
+end
+
+function Perf.quality(level)
+	pcall(function()
+		local r = settings().Rendering
+		if Perf.origQuality == nil then
+			Perf.origQuality = r.QualityLevel
+		end
+		r.QualityLevel = level
+	end)
+end
+
+function Perf.shadows(off)
+	if off then
+		if Perf.orig.shadows == nil then
+			Perf.orig.shadows = Lighting.GlobalShadows
+		end
+		Lighting.GlobalShadows = false
+	elseif Perf.orig.shadows ~= nil then
+		Lighting.GlobalShadows = Perf.orig.shadows
+		Perf.orig.shadows = nil
+	end
+end
+
+local EFFECTS = {
+	BlurEffect = true,
+	BloomEffect = true,
+	SunRaysEffect = true,
+	ColorCorrectionEffect = true,
+	DepthOfFieldEffect = true,
+}
+function Perf.postfx(off)
+	if off then
+		Perf.fxOrig = Perf.fxOrig or {}
+		local function scan(parent)
+			for _, e in ipairs(parent:GetChildren()) do
+				if EFFECTS[e.ClassName] and e.Name ~= "KevinwareBlur" then
+					if Perf.fxOrig[e] == nil then
+						Perf.fxOrig[e] = e.Enabled
+					end
+					e.Enabled = false
+				end
+			end
+		end
+		scan(Lighting)
+		if Workspace.CurrentCamera then
+			scan(Workspace.CurrentCamera)
+		end
+	elseif Perf.fxOrig then
+		for e, en in pairs(Perf.fxOrig) do
+			if e.Parent then
+				e.Enabled = en
+			end
+		end
+		Perf.fxOrig = nil
+	end
+end
+
+local PARTICLES = { ParticleEmitter = true, Trail = true, Beam = true, Fire = true, Smoke = true, Sparkles = true }
+local WORLD = {
+	smooth = {
+		test = function(d)
+			return d:IsA("BasePart") and not d:IsA("Terrain")
+		end,
+		apply = function(d)
+			local o = d.Material
+			d.Material = Enum.Material.SmoothPlastic
+			return o
+		end,
+		restore = function(d, o)
+			d.Material = o
+		end,
+	},
+	textures = {
+		test = function(d)
+			return d:IsA("Decal") or d:IsA("Texture")
+		end,
+		apply = function(d)
+			local o = d.Transparency
+			d.Transparency = 1
+			return o
+		end,
+		restore = function(d, o)
+			d.Transparency = o
+		end,
+	},
+	particles = {
+		test = function(d)
+			return PARTICLES[d.ClassName] == true
+		end,
+		apply = function(d)
+			local o = d.Enabled
+			d.Enabled = false
+			return o
+		end,
+		restore = function(d, o)
+			d.Enabled = o
+		end,
+	},
+}
+for name in pairs(WORLD) do
+	Perf.worldState[name] = { on = false, store = setmetatable({}, { __mode = "k" }) }
+end
+
+function Perf.world(name, on)
+	local f, st = WORLD[name], Perf.worldState[name]
+	if on == st.on then
+		return
+	end
+	st.on = on
+	if st.token then
+		st.token.cancel = true
+	end
+	if st.conn then
+		st.conn:Disconnect()
+		st.conn = nil
+	end
+	local token = { cancel = false }
+	st.token = token
+	local function handle(d)
+		pcall(function()
+			if f.test(d) and st.store[d] == nil then
+				st.store[d] = f.apply(d)
+			end
+		end)
+	end
+	if on then
+		st.conn = Workspace.DescendantAdded:Connect(handle)
+		task.spawn(function()
+			local list = Workspace:GetDescendants()
+			for i, d in ipairs(list) do
+				if token.cancel then
+					return
+				end
+				handle(d)
+				if i % 500 == 0 then
+					task.wait()
+				end
+			end
+		end)
+	else
+		task.spawn(function()
+			local n = 0
+			for d, o in pairs(st.store) do
+				if token.cancel then
+					return
+				end
+				pcall(function()
+					if d.Parent then
+						f.restore(d, o)
+					end
+				end)
+				st.store[d] = nil
+				n += 1
+				if n % 500 == 0 then
+					task.wait()
+				end
+			end
+		end)
+	end
+end
+
+function Perf.terrain(on)
+	local t = Workspace:FindFirstChildOfClass("Terrain")
+	if not t then
+		return
+	end
+	if on then
+		if not Perf.terrainOrig then
+			local o = {}
+			pcall(function()
+				o.WaterReflectance = t.WaterReflectance
+				o.WaterWaveSize = t.WaterWaveSize
+				o.WaterWaveSpeed = t.WaterWaveSpeed
+			end)
+			pcall(function()
+				o.Decoration = t.Decoration
+			end)
+			Perf.terrainOrig = o
+		end
+		pcall(function()
+			t.WaterReflectance = 0
+			t.WaterWaveSize = 0
+			t.WaterWaveSpeed = 0
+		end)
+		if type(sethiddenproperty) == "function" then
+			pcall(sethiddenproperty, t, "Decoration", false)
+		else
+			pcall(function()
+				t.Decoration = false
+			end)
+		end
+	elseif Perf.terrainOrig then
+		local o = Perf.terrainOrig
+		Perf.terrainOrig = nil
+		pcall(function()
+			t.WaterReflectance = o.WaterReflectance
+			t.WaterWaveSize = o.WaterWaveSize
+			t.WaterWaveSpeed = o.WaterWaveSpeed
+		end)
+		if o.Decoration ~= nil then
+			if type(sethiddenproperty) == "function" then
+				pcall(sethiddenproperty, t, "Decoration", o.Decoration)
+			else
+				pcall(function()
+					t.Decoration = o.Decoration
+				end)
+			end
+		end
+	end
+end
+
+function Perf.render3d(off)
+	pcall(function()
+		RunService:Set3dRenderingEnabled(not off)
+	end)
+	Perf.render3dOff = off
+end
+
+function Perf.clearMemory()
+	local before = Stats:GetTotalMemoryUsageMb()
+	pcall(collectgarbage, "collect")
+	task.wait(0.25)
+	return before, Stats:GetTotalMemoryUsageMb()
+end
+
+function Perf.restoreAll()
+	for name in pairs(WORLD) do
+		Perf.world(name, false)
+	end
+	Perf.shadows(false)
+	Perf.postfx(false)
+	Perf.terrain(false)
+	if Perf.render3dOff then
+		Perf.render3d(false)
+	end
+	if Perf.origQuality ~= nil then
+		pcall(function()
+			settings().Rendering.QualityLevel = Perf.origQuality
+		end)
+	end
+	if Perf.origFps and type(setfpscap) == "function" then
+		pcall(setfpscap, Perf.origFps)
+	end
+end
+onUnload(Perf.restoreAll)
+
+--========================================================================
+-- ENVIRONMENT  (client-side lighting, sky, atmosphere, clouds)
+-- Presets override the game's own sky / atmosphere / color grading and
+-- re-apply themselves if the game changes them back.
+--========================================================================
+local Env = { desired = {}, busy = 0, lock = true, override = true, orig = {}, ui = {}, touched = false }
+local ENV_PROPS = {
+	"ClockTime",
+	"Brightness",
+	"Ambient",
+	"OutdoorAmbient",
+	"ColorShift_Top",
+	"ColorShift_Bottom",
+	"ExposureCompensation",
+	"FogColor",
+	"FogEnd",
+	"FogStart",
+}
+for _, p in ipairs(ENV_PROPS) do
+	pcall(function()
+		Env.orig[p] = Lighting[p]
+	end)
+end
+
+local SKY_PROPS = { "SkyboxBk", "SkyboxDn", "SkyboxFt", "SkyboxLf", "SkyboxRt", "SkyboxUp", "StarCount", "CelestialBodiesShown" }
+local ATMOS_PROPS = { "Density", "Offset", "Color", "Decay", "Glare", "Haze" }
+local CLOUD_PROPS = { "Enabled", "Cover", "Density", "Color" }
+local GRADE_PROPS = { "TintColor", "Saturation", "Contrast", "Brightness" }
+local FACE = { SkyboxBk = true, SkyboxDn = true, SkyboxFt = true, SkyboxLf = true, SkyboxRt = true, SkyboxUp = true }
+local DEFAULT_FACES = {
+	SkyboxBk = "rbxasset://textures/sky/sky512_bk.tex",
+	SkyboxDn = "rbxasset://textures/sky/sky512_dn.tex",
+	SkyboxFt = "rbxasset://textures/sky/sky512_ft.tex",
+	SkyboxLf = "rbxasset://textures/sky/sky512_lf.tex",
+	SkyboxRt = "rbxasset://textures/sky/sky512_rt.tex",
+	SkyboxUp = "rbxasset://textures/sky/sky512_up.tex",
+}
+
+local function capture(inst, props)
+	local o = {}
+	for _, p in ipairs(props) do
+		pcall(function()
+			o[p] = inst[p]
+		end)
+	end
+	return o
+end
+
+local function restoreProps(inst, o)
+	for p, v in pairs(o) do
+		pcall(function()
+			inst[p] = v
+		end)
+	end
+end
+
+local function pushProps(inst, props)
+	for p, v in pairs(props) do
+		if inst[p] ~= v then
+			pcall(function()
+				inst[p] = v
+			end)
+		end
+	end
+end
+
+local function eachChild(parent, class, fn)
+	for _, c in ipairs(parent:GetChildren()) do
+		if c:IsA(class) then
+			fn(c)
+		end
+	end
+end
+
+Env.skyStore = setmetatable({}, { __mode = "k" })
+Env.atmosStore = setmetatable({}, { __mode = "k" })
+Env.gradeStore = setmetatable({}, { __mode = "k" })
+
+function Env.set(props, dur)
+	Env.touched = true
+	for p, v in pairs(props) do
+		Env.desired[p] = v
+	end
+	if dur and dur > 0 then
+		Env.busy += 1
+		local tw = TweenService:Create(Lighting, TweenInfo.new(dur, Enum.EasingStyle.Quint, Enum.EasingDirection.Out), props)
+		tw.Completed:Connect(function()
+			Env.busy -= 1
+		end)
+		tw:Play()
+	else
+		for p, v in pairs(props) do
+			pcall(function()
+				Lighting[p] = v
+			end)
+		end
+	end
+end
+
+-- ---- sky / atmosphere: the game's own are moved out of Lighting so ours is the only one,
+-- and everything is re-enforced every frame AFTER all game scripts have run
+Env.quarantined = {}
+Env.origParent = setmetatable({}, { __mode = "k" })
+
+local function quarantine(inst)
+	if not Env.quarantined[inst] then
+		Env.quarantined[inst] = true
+		Env.origParent[inst] = inst.Parent
+	end
+	if inst.Parent ~= nil then
+		pcall(function()
+			inst.Parent = nil
+		end)
+	end
+end
+
+function Env.release(class)
+	for inst in pairs(Env.quarantined) do
+		if inst:IsA(class) then
+			Env.quarantined[inst] = nil
+			local p = Env.origParent[inst]
+			Env.origParent[inst] = nil
+			pcall(function()
+				inst.Parent = (p and p.Parent) and p or Lighting
+			end)
+		end
+	end
+end
+
+local function ensureOwn(kind)
+	local key = kind == "Sky" and "ownSky" or "ownAtmos"
+	local inst = Env[key]
+	if inst and inst.Parent == Lighting then
+		return inst
+	end
+	if inst then
+		inst:Destroy()
+	end
+	inst = Instance.new(kind)
+	inst.Name = "Kevinware" .. kind
+	inst.Parent = Lighting
+	Env[key] = inst
+	return inst
+end
+
+local function dropOwn(kind)
+	local key = kind == "Sky" and "ownSky" or "ownAtmos"
+	if Env[key] then
+		Env[key]:Destroy()
+		Env[key] = nil
+	end
+end
+
+-- ---- huge non-solid "dome" meshes some games use as a fake sky
+Env.domeStore = setmetatable({}, { __mode = "k" })
+local DOME_NAMES = { "sky", "dome", "galaxy", "space", "heaven" }
+
+local function isDome(d)
+	if not d:IsA("BasePart") or d:IsA("Terrain") then
+		return false
+	end
+	if d.CanCollide or d.Transparency >= 0.95 then
+		return false
+	end
+	local s = d.Size
+	local m = math.max(s.X, s.Y, s.Z)
+	if m >= 1500 then
+		return true
+	end
+	if m >= 250 then
+		local n = string.lower(d.Name)
+		for _, w in ipairs(DOME_NAMES) do
+			if string.find(n, w, 1, true) then
+				return true
+			end
+		end
+	end
+	return false
+end
+
+local function hideDome(d)
+	if Env.domeStore[d] then
+		return
+	end
+	local rec = { mod = d.LocalTransparencyModifier, kids = {} }
+	d.LocalTransparencyModifier = 1
+	for _, k in ipairs(d:GetChildren()) do
+		if k:IsA("Decal") or k:IsA("Texture") then
+			rec.kids[k] = k.Transparency
+			k.Transparency = 1
+		elseif k:IsA("SurfaceGui") then
+			rec.kids[k] = k.Enabled
+			k.Enabled = false
+		end
+	end
+	Env.domeStore[d] = rec
+end
+
+function Env.domes(on)
+	if on == Env.domeOn then
+		return
+	end
+	Env.domeOn = on
+	if Env.domeToken then
+		Env.domeToken.cancel = true
+	end
+	if Env.domeConn then
+		Env.domeConn:Disconnect()
+		Env.domeConn = nil
+	end
+	local token = { cancel = false }
+	Env.domeToken = token
+	if on then
+		Env.domeConn = Workspace.DescendantAdded:Connect(function(d)
+			task.defer(function()
+				if Env.domeOn and d.Parent and isDome(d) then
+					pcall(hideDome, d)
+				end
+			end)
+		end)
+		task.spawn(function()
+			local list = Workspace:GetDescendants()
+			for i, d in ipairs(list) do
+				if token.cancel then
+					return
+				end
+				if isDome(d) then
+					pcall(hideDome, d)
+				end
+				if i % 400 == 0 then
+					task.wait()
+				end
+			end
+		end)
+	else
+		for d, rec in pairs(Env.domeStore) do
+			pcall(function()
+				d.LocalTransparencyModifier = rec.mod
+				for k, v in pairs(rec.kids) do
+					if k:IsA("SurfaceGui") then
+						k.Enabled = v
+					else
+						k.Transparency = v
+					end
+				end
+			end)
+			Env.domeStore[d] = nil
+		end
+	end
+end
+
+function Env.refreshDomes()
+	Env.domes((Env.override and Env.touched and Env.hideDomes and not unloaded) == true)
+end
+
+function Env.syncAll()
+	Env.refreshDomes()
+	local skyOn = Env.skyFaces ~= nil or Env.skyProps ~= nil
+	local atmOn = Env.atmosProps ~= nil
+	local gradeOn = Env.override and Env.touched
+	if not (skyOn or atmOn or gradeOn or next(Env.gradeStore) ~= nil) then
+		return
+	end
+	local useFaces = Env.skyFaces ~= nil and (Env.skyFacesForce or Env.override)
+
+	local gameSkies, gameAtmos = {}, {}
+	local function scan(parent)
+		for _, c in ipairs(parent:GetChildren()) do
+			local cn = c.ClassName
+			if cn == "Sky" then
+				if c ~= Env.ownSky then
+					table.insert(gameSkies, c)
+				end
+			elseif cn == "Atmosphere" then
+				if c ~= Env.ownAtmos then
+					table.insert(gameAtmos, c)
+				end
+			elseif cn == "ColorCorrectionEffect" then
+				if gradeOn then
+					if Env.gradeStore[c] == nil then
+						Env.gradeStore[c] = c.Enabled
+					end
+					if c.Enabled then
+						c.Enabled = false
+					end
+				elseif Env.gradeStore[c] ~= nil then
+					c.Enabled = Env.gradeStore[c]
+					Env.gradeStore[c] = nil
+				end
+			end
+		end
+	end
+	scan(Lighting)
+	if Workspace.CurrentCamera then
+		scan(Workspace.CurrentCamera)
+	end
+
+	if skyOn then
+		if useFaces then
+			for _, s in ipairs(gameSkies) do
+				quarantine(s)
+			end
+			local own = ensureOwn("Sky")
+			pushProps(own, Env.skyFaces)
+			if Env.skyProps then
+				pushProps(own, Env.skyProps)
+			end
+		else
+			Env.release("Sky")
+			if #gameSkies > 0 then
+				dropOwn("Sky")
+				for _, s in ipairs(gameSkies) do
+					if not Env.skyStore[s] then
+						Env.skyStore[s] = capture(s, SKY_PROPS)
+					end
+					if Env.skyProps then
+						pushProps(s, Env.skyProps)
+					end
+				end
+			elseif Env.skyProps then
+				pushProps(ensureOwn("Sky"), Env.skyProps)
+			end
+		end
+	end
+
+	if atmOn then
+		if Env.override then
+			for _, a in ipairs(gameAtmos) do
+				quarantine(a)
+			end
+			pushProps(ensureOwn("Atmosphere"), Env.atmosProps)
+		else
+			Env.release("Atmosphere")
+			if #gameAtmos > 0 then
+				dropOwn("Atmosphere")
+				for _, a in ipairs(gameAtmos) do
+					if not Env.atmosStore[a] then
+						Env.atmosStore[a] = capture(a, ATMOS_PROPS)
+					end
+					pushProps(a, Env.atmosProps)
+				end
+			else
+				pushProps(ensureOwn("Atmosphere"), Env.atmosProps)
+			end
+		end
+	end
+end
+
+do
+	-- runs after every game RenderStepped script, right before the frame is drawn
+	RunService:BindToRenderStep("KevinwareEnv", Enum.RenderPriority.Last.Value + 1, function()
+		if not Env.lock then
+			return
+		end
+		if Env.busy <= 0 then
+			for p, v in pairs(Env.desired) do
+				if Lighting[p] ~= v then
+					pcall(function()
+						Lighting[p] = v
+					end)
+				end
+			end
+		end
+		Env.syncAll()
+	end)
+	onUnload(function()
+		pcall(function()
+			RunService:UnbindFromRenderStep("KevinwareEnv")
+		end)
+	end)
+	bindConn(Lighting.ChildAdded, function()
+		if Env.lock then
+			task.defer(Env.syncAll)
+		end
+	end)
+end
+
+function Env.useDefaultSky()
+	if not Env.skyFacesForce then
+		Env.skyFaces = DEFAULT_FACES
+	end
+end
+
+function Env.setOverride(on)
+	Env.override = on
+	Env.syncAll()
+end
+
+function Env.resetSky()
+	Env.skyFaces, Env.skyProps, Env.atmosProps, Env.skyFacesForce = nil, nil, nil, false
+	for _, c in ipairs(Lighting:GetChildren()) do
+		if c:IsA("Sky") and Env.skyStore[c] then
+			restoreProps(c, Env.skyStore[c])
+			Env.skyStore[c] = nil
+		elseif c:IsA("Atmosphere") and Env.atmosStore[c] then
+			restoreProps(c, Env.atmosStore[c])
+			Env.atmosStore[c] = nil
+		end
+	end
+	if Env.ownSky then
+		Env.ownSky:Destroy()
+		Env.ownSky = nil
+	end
+	if Env.ownAtmos then
+		Env.ownAtmos:Destroy()
+		Env.ownAtmos = nil
+	end
+end
+
+local SKY_THEMES = {
+	Clear = {
+		sky = { StarCount = 0, CelestialBodiesShown = true },
+		atmos = { Density = 0.12, Offset = 0, Color = rgb(199, 214, 235), Decay = rgb(106, 125, 150), Glare = 0, Haze = 0 },
+	},
+	Sunset = {
+		sky = { StarCount = 0, CelestialBodiesShown = true },
+		atmos = { Density = 0.38, Offset = 0.25, Color = rgb(255, 165, 120), Decay = rgb(150, 70, 90), Glare = 0.9, Haze = 1.8 },
+	},
+	Dusk = {
+		sky = { StarCount = 800, CelestialBodiesShown = true },
+		atmos = { Density = 0.3, Offset = 0.1, Color = rgb(190, 150, 230), Decay = rgb(90, 50, 130), Glare = 0.2, Haze = 1.2 },
+	},
+	Starry = {
+		sky = { StarCount = 5000, CelestialBodiesShown = true },
+		atmos = { Density = 0.06, Offset = 0, Color = rgb(40, 55, 110), Decay = rgb(15, 20, 50), Glare = 0, Haze = 0 },
+	},
+	Aurora = {
+		sky = { StarCount = 3500, CelestialBodiesShown = true },
+		atmos = { Density = 0.25, Offset = 0.2, Color = rgb(110, 255, 200), Decay = rgb(60, 40, 140), Glare = 0.1, Haze = 1 },
+	},
+	Fog = {
+		sky = { StarCount = 0, CelestialBodiesShown = true },
+		atmos = { Density = 0.55, Offset = 0, Color = rgb(205, 210, 220), Decay = rgb(160, 168, 180), Glare = 0, Haze = 3.5 },
+	},
+	Void = {
+		sky = { StarCount = 0, CelestialBodiesShown = false },
+		atmos = { Density = 0.95, Offset = 1, Color = rgb(0, 0, 0), Decay = rgb(0, 0, 0), Glare = 0, Haze = 10 },
+	},
+}
+local SKY_NAMES = { "Game default", "Clear", "Sunset", "Dusk", "Starry", "Aurora", "Fog", "Void" }
+
+function Env.skyTheme(name)
+	if name == "Game default" then
+		Env.resetSky()
+		return
+	end
+	local def = SKY_THEMES[name]
+	if not def then
+		return
+	end
+	Env.touched = true
+	Env.skyProps = def.sky
+	Env.atmosProps = def.atmos
+	Env.useDefaultSky()
+	Env.syncAll()
+end
+
+function Env.customSky(text)
+	local ids = {}
+	for id in string.gmatch(text or "", "%d+") do
+		table.insert(ids, id)
+	end
+	if #ids ~= 1 and #ids ~= 6 then
+		return false
+	end
+	local order = { "SkyboxBk", "SkyboxDn", "SkyboxFt", "SkyboxLf", "SkyboxRt", "SkyboxUp" }
+	local faces = {}
+	for i, face in ipairs(order) do
+		faces[face] = "rbxassetid://" .. ids[#ids == 1 and 1 or i]
+	end
+	Env.touched = true
+	Env.skyFaces = faces
+	Env.skyFacesForce = true
+	Env.syncAll()
+	return true
+end
+
+-- ---- clouds
+function Env.getClouds(create)
+	local terrain = Workspace:FindFirstChildOfClass("Terrain")
+	if not terrain then
+		return nil
+	end
+	local c = terrain:FindFirstChildOfClass("Clouds")
+	if c then
+		if not Env.cloudsOrig and c ~= Env.cloudsCreated then
+			Env.cloudsOrig = capture(c, CLOUD_PROPS)
+			Env.cloudsOrigInst = c
+		end
+		return c
+	elseif create then
+		local n = Instance.new("Clouds")
+		n.Parent = terrain
+		Env.cloudsCreated = n
+		return n
+	end
+	return nil
+end
+
+function Env.clouds(on, cover)
+	local c = Env.getClouds(true)
+	if not c then
+		return
+	end
+	if on ~= nil then
+		c.Enabled = on
+	end
+	if cover ~= nil then
+		c.Cover = cover
+	end
+end
+
+-- ---- time of day
+local TIMES = {
+	Sunrise = {
+		light = {
+			ClockTime = 6.1,
+			Brightness = 2,
+			Ambient = rgb(104, 86, 96),
+			OutdoorAmbient = rgb(150, 118, 120),
+			ColorShift_Top = rgb(255, 168, 110),
+			ExposureCompensation = 0,
+		},
+		atmos = { Density = 0.35, Offset = 0.15, Color = rgb(255, 190, 150), Decay = rgb(150, 100, 110), Glare = 0.3, Haze = 1.2 },
+	},
+	Day = {
+		light = {
+			ClockTime = 13.5,
+			Brightness = 3,
+			Ambient = rgb(128, 128, 128),
+			OutdoorAmbient = rgb(160, 160, 160),
+			ColorShift_Top = rgb(0, 0, 0),
+			ExposureCompensation = 0,
+		},
+		atmos = { Density = 0.3, Offset = 0.1, Color = rgb(199, 199, 199), Decay = rgb(106, 112, 125), Glare = 0, Haze = 0 },
+	},
+	Afternoon = {
+		light = {
+			ClockTime = 16.6,
+			Brightness = 2.6,
+			Ambient = rgb(122, 110, 98),
+			OutdoorAmbient = rgb(168, 146, 122),
+			ColorShift_Top = rgb(255, 200, 140),
+			ExposureCompensation = 0.1,
+		},
+		atmos = { Density = 0.32, Offset = 0.15, Color = rgb(255, 215, 170), Decay = rgb(140, 100, 70), Glare = 0.2, Haze = 0.8 },
+	},
+	Sunset = {
+		light = {
+			ClockTime = 18.2,
+			Brightness = 1.8,
+			Ambient = rgb(92, 68, 88),
+			OutdoorAmbient = rgb(150, 104, 112),
+			ColorShift_Top = rgb(255, 136, 88),
+			ExposureCompensation = 0.1,
+		},
+		atmos = { Density = 0.38, Offset = 0.25, Color = rgb(255, 150, 110), Decay = rgb(150, 70, 90), Glare = 0.8, Haze = 1.6 },
+	},
+	Night = {
+		light = {
+			ClockTime = 0,
+			Brightness = 1,
+			Ambient = rgb(30, 36, 66),
+			OutdoorAmbient = rgb(52, 62, 108),
+			ColorShift_Top = rgb(50, 70, 130),
+			ExposureCompensation = 0,
+		},
+		atmos = { Density = 0.3, Offset = 0.1, Color = rgb(55, 70, 120), Decay = rgb(20, 25, 50), Glare = 0, Haze = 0.5 },
+	},
+}
+local TIME_NAMES = { "Sunrise", "Day", "Afternoon", "Sunset", "Night" }
+
+function Env.timePreset(name)
+	local p = TIMES[name]
+	if not p then
+		return
+	end
+	local props = {}
+	for k, v in pairs(p.light) do
+		props[k] = v
+	end
+	Env.set(props, 1.6)
+	Env.skyProps = { StarCount = 3000, CelestialBodiesShown = true }
+	Env.atmosProps = p.atmos
+	Env.useDefaultSky()
+	Env.syncAll()
+end
+
+function Env.reset()
+	Env.desired = {}
+	Env.busy = 0
+	Env.touched = false
+	for p, v in pairs(Env.orig) do
+		pcall(function()
+			Lighting[p] = v
+		end)
+	end
+	Env.resetSky()
+	Env.syncGrade()
+	if Env.cloudsCreated then
+		Env.cloudsCreated:Destroy()
+		Env.cloudsCreated = nil
+	end
+	if Env.cloudsOrig and Env.cloudsOrigInst and Env.cloudsOrigInst.Parent then
+		restoreProps(Env.cloudsOrigInst, Env.cloudsOrig)
+	end
+end
+onUnload(Env.reset)
+
+-- ---- bridge for the quarantine engine above
+-- It moves the game's own Sky / Atmosphere out of Lighting and keeps colour grading in
+-- gradeStore as Enabled flags, so a reset has to give them back.
+function Env.syncGrade()
+	Env.syncAll()
+end
+
+do
+	local rawResetSky = Env.resetSky
+	function Env.resetSky()
+		Env.release("Sky")
+		Env.release("Atmosphere")
+		rawResetSky()
+	end
+end
+
+--========================================================================
+-- ESP  (engine + tab + live preview panel)
+--========================================================================
+local ESP = {
+	frame = 0,
+	objs = {},
+	s = {
+		enabled = false,
+		teamCheck = false,
+		teamColors = false,
+		maxDist = 5000, -- 5000 = unlimited
+		box = true,
+		boxStyle = "Box",
+		boxFill = false,
+		fillOpacity = 0.85,
+		name = true,
+		nameType = "Display name",
+		health = true,
+		healthText = false,
+		distance = true,
+		tool = false,
+		headDot = false,
+		tracers = false,
+		tracerOrigin = "Bottom",
+		skeleton = false,
+		arrows = false,
+		chams = false,
+		chamsFill = 0.6,
+		chamsThrough = true,
+		color = rgb(255, 82, 82),
+		visCheck = false,
+		visColor = rgb(80, 255, 130),
+		hidColor = rgb(255, 82, 82),
+		rainbow = false,
+		textSize = 13,
+		textOutline = true,
+	},
+}
+
+do
+	local espLayer = new("Frame", {
+		Name = "Esp",
+		BackgroundTransparency = 1,
+		BorderSizePixel = 0,
+		Size = UDim2.fromScale(1, 1),
+		ZIndex = 0,
+		Visible = false,
+	}, gui)
+
+	local SKEL_R15 = {
+		{ "Head", "UpperTorso" },
+		{ "UpperTorso", "LowerTorso" },
+		{ "UpperTorso", "LeftUpperArm" },
+		{ "LeftUpperArm", "LeftLowerArm" },
+		{ "LeftLowerArm", "LeftHand" },
+		{ "UpperTorso", "RightUpperArm" },
+		{ "RightUpperArm", "RightLowerArm" },
+		{ "RightLowerArm", "RightHand" },
+		{ "LowerTorso", "LeftUpperLeg" },
+		{ "LeftUpperLeg", "LeftLowerLeg" },
+		{ "LeftLowerLeg", "LeftFoot" },
+		{ "LowerTorso", "RightUpperLeg" },
+		{ "RightUpperLeg", "RightLowerLeg" },
+		{ "RightLowerLeg", "RightFoot" },
+	}
+	local SKEL_R6 = {
+		{ "Head", "Torso" },
+		{ "Torso", "Left Arm" },
+		{ "Torso", "Right Arm" },
+		{ "Torso", "Left Leg" },
+		{ "Torso", "Right Leg" },
+	}
+	local rayParams = RaycastParams.new()
+	rayParams.FilterType = Enum.RaycastFilterType.Exclude
+
+	local function mkLine(parent)
+		return frame({ AnchorPoint = Vector2.new(0.5, 0.5), BackgroundColor3 = C.white, Visible = false }, parent)
+	end
+	local function setLine(f, a, b, th)
+		local dx, dy = b.X - a.X, b.Y - a.Y
+		f.Size = UDim2.fromOffset(math.sqrt(dx * dx + dy * dy), th)
+		f.Position = UDim2.fromOffset((a.X + b.X) / 2, (a.Y + b.Y) / 2)
+		f.Rotation = math.deg(math.atan2(dy, dx))
+		f.Visible = true
+	end
+
+	local function newObj(plr)
+		local o = { plr = plr, phase = math.random(0, 2), visible = true, skel = {}, corners = {} }
+		o.root = frame({ Name = plr.Name, BackgroundTransparency = 1, Size = UDim2.fromScale(1, 1), Visible = false }, espLayer)
+		o.box = frame({ BackgroundColor3 = C.white, BackgroundTransparency = 1, Visible = false }, o.root)
+		o.boxStroke = stroke(o.box, 0, C.white, 1.5)
+		for i = 1, 8 do
+			o.corners[i] = frame({ BackgroundColor3 = C.white, Visible = false }, o.root)
+		end
+		local function txt()
+			return label({
+				Size = UDim2.fromOffset(200, 16),
+				AnchorPoint = Vector2.new(0.5, 0),
+				TextXAlignment = Enum.TextXAlignment.Center,
+				Font = Enum.Font.GothamSemibold,
+				TextSize = 13,
+				TextStrokeTransparency = 0.35,
+				Visible = false,
+			}, o.root)
+		end
+		o.name, o.dist, o.tool = txt(), txt(), txt()
+		o.hpText = txt()
+		o.hpText.AnchorPoint = Vector2.new(1, 0.5)
+		o.hpText.TextXAlignment = Enum.TextXAlignment.Right
+		o.hpText.Size = UDim2.fromOffset(40, 14)
+		o.hpBg = frame({ BackgroundColor3 = C.black, BackgroundTransparency = 0.4, Visible = false }, o.root)
+		o.hpFill = frame({ BackgroundColor3 = C.white, Visible = false }, o.root)
+		o.tracer = mkLine(o.root)
+		for i = 1, 14 do
+			o.skel[i] = mkLine(o.root)
+		end
+		o.dot = frame({ AnchorPoint = Vector2.new(0.5, 0.5), BackgroundColor3 = C.white, Visible = false }, o.root)
+		corner(o.dot, 99)
+		o.arrow = frame({
+			AnchorPoint = Vector2.new(0.5, 0.5),
+			Size = UDim2.fromOffset(12, 12),
+			BackgroundColor3 = C.white,
+			Visible = false,
+		}, o.root)
+		corner(o.arrow, 3)
+		return o
+	end
+
+	function ESP.add(plr)
+		if not ESP.objs[plr] then
+			ESP.objs[plr] = newObj(plr)
+		end
+	end
+	function ESP.remove(plr)
+		local o = ESP.objs[plr]
+		if o then
+			if o.hl then
+				o.hl:Destroy()
+			end
+			o.root:Destroy()
+			ESP.objs[plr] = nil
+		end
+	end
+
+	local function setChams(o, on, char, col)
+		if on then
+			if not o.hl or not o.hl.Parent then
+				o.hl = Instance.new("Highlight")
+				o.hl.Name = "KevinwareChams"
+				o.hl.Parent = gui
+			end
+			local h, s = o.hl, ESP.s
+			h.Adornee = char
+			h.FillColor = col
+			h.OutlineColor = col
+			h.FillTransparency = s.chamsFill
+			h.OutlineTransparency = 0.1
+			h.DepthMode = s.chamsThrough and Enum.HighlightDepthMode.AlwaysOnTop or Enum.HighlightDepthMode.Occluded
+			h.Enabled = true
+		elseif o.hl then
+			o.hl:Destroy()
+			o.hl = nil
+		end
+	end
+
+	local function hideDetails(o)
+		o.box.Visible = false
+		for i = 1, 8 do
+			o.corners[i].Visible = false
+		end
+		o.name.Visible, o.dist.Visible, o.tool.Visible, o.hpText.Visible = false, false, false, false
+		o.hpBg.Visible, o.hpFill.Visible, o.dot.Visible = false, false, false
+		for i = 1, #o.skel do
+			o.skel[i].Visible = false
+		end
+	end
+
+	local function update()
+		local cam = Workspace.CurrentCamera
+		if not cam then
+			return
+		end
+		local s = ESP.s
+		ESP.frame += 1
+		local vp = cam.ViewportSize
+		local myChar = LocalPlayer.Character
+		local camPos = cam.CFrame.Position
+		local rainbow = s.rainbow and Color3.fromHSV((os.clock() * 0.25) % 1, 0.85, 1) or nil
+		local ts = s.textSize
+
+		for plr, o in pairs(ESP.objs) do
+			local char = plr.Character
+			local root = char and char:FindFirstChild("HumanoidRootPart")
+			local hum = char and char:FindFirstChildOfClass("Humanoid")
+			local show = root ~= nil and hum ~= nil and hum.Health > 0
+			if show and s.teamCheck and plr.Team ~= nil and plr.Team == LocalPlayer.Team then
+				show = false
+			end
+			local dist = 0
+			if show then
+				dist = (camPos - root.Position).Magnitude
+				if s.maxDist < 5000 and dist > s.maxDist then
+					show = false
+				end
+			end
+
+			if not show then
+				o.root.Visible = false
+				setChams(o, false)
+			else
+				o.root.Visible = true
+				local col = s.color
+				if rainbow then
+					col = rainbow
+				elseif s.teamColors and plr.Team then
+					col = plr.TeamColor.Color
+				elseif s.visCheck then
+					if (ESP.frame + o.phase) % 3 == 0 then
+						local head = char:FindFirstChild("Head") or root
+						local filter = { char }
+						if myChar then
+							filter[2] = myChar
+						end
+						rayParams.FilterDescendantsInstances = filter
+						o.visible = Workspace:Raycast(camPos, head.Position - camPos, rayParams) == nil
+					end
+					col = o.visible and s.visColor or s.hidColor
+				end
+				setChams(o, s.chams, char, col)
+
+				local rp = cam:WorldToViewportPoint(root.Position)
+				local tp = cam:WorldToViewportPoint(root.Position + Vector3.new(0, 2.7, 0))
+				local bp = cam:WorldToViewportPoint(root.Position - Vector3.new(0, 3.1, 0))
+				local inFront = rp.Z > 0
+				local onScreen = inFront and rp.X > -60 and rp.X < vp.X + 60 and rp.Y > -60 and rp.Y < vp.Y + 60
+
+				-- tracer
+				if s.tracers and inFront then
+					local origin
+					local m = s.tracerOrigin
+					if m == "Bottom" then
+						origin = Vector2.new(vp.X / 2, vp.Y)
+					elseif m == "Center" then
+						origin = vp / 2
+					elseif m == "Top" then
+						origin = Vector2.new(vp.X / 2, 0)
+					else
+						origin = UserInputService:GetMouseLocation()
+					end
+					o.tracer.BackgroundColor3 = col
+					setLine(o.tracer, origin, Vector2.new(rp.X, bp.Y), 1.5)
+				else
+					o.tracer.Visible = false
+				end
+
+				if onScreen then
+					o.arrow.Visible = false
+					local height = math.abs(bp.Y - tp.Y)
+					local width = height * 0.58
+					local cx = rp.X
+					local x1, y1 = cx - width / 2, tp.Y
+					local style = s.boxStyle
+
+					-- box / corners / fill
+					o.box.Visible = s.box and (style == "Box" or s.boxFill)
+					if o.box.Visible then
+						o.box.Position = UDim2.fromOffset(x1, y1)
+						o.box.Size = UDim2.fromOffset(width, height)
+						o.box.BackgroundColor3 = col
+						o.box.BackgroundTransparency = s.boxFill and s.fillOpacity or 1
+						o.boxStroke.Enabled = style == "Box"
+						o.boxStroke.Color = col
+					end
+					local cornerOn = s.box and style == "Corner"
+					if cornerOn then
+						local len, th = math.min(width, height) * 0.3, 2
+						local c = o.corners
+						local specs = {
+							{ x1, y1, len, th },
+							{ x1, y1, th, len },
+							{ x1 + width - len, y1, len, th },
+							{ x1 + width - th, y1, th, len },
+							{ x1, y1 + height - th, len, th },
+							{ x1, y1 + height - len, th, len },
+							{ x1 + width - len, y1 + height - th, len, th },
+							{ x1 + width - th, y1 + height - len, th, len },
+						}
+						for i = 1, 8 do
+							local sp = specs[i]
+							c[i].Position = UDim2.fromOffset(sp[1], sp[2])
+							c[i].Size = UDim2.fromOffset(sp[3], sp[4])
+							c[i].BackgroundColor3 = col
+						end
+					end
+					for i = 1, 8 do
+						o.corners[i].Visible = cornerOn
+					end
+
+					-- text
+					local strokeT = s.textOutline and 0.35 or 1
+					o.name.Visible = s.name
+					if s.name then
+						o.name.Text = s.nameType == "Username" and plr.Name or plr.DisplayName
+						o.name.TextSize = ts
+						o.name.TextColor3 = col
+						o.name.TextStrokeTransparency = strokeT
+						o.name.Position = UDim2.fromOffset(cx, y1 - ts - 5)
+					end
+					local ly = y1 + height + 3
+					o.dist.Visible = s.distance
+					if s.distance then
+						o.dist.Text = "[" .. math.floor(dist) .. "]"
+						o.dist.TextSize = ts
+						o.dist.TextColor3 = col
+						o.dist.TextStrokeTransparency = strokeT
+						o.dist.Position = UDim2.fromOffset(cx, ly)
+						ly += ts + 1
+					end
+					local toolInst = s.tool and char:FindFirstChildOfClass("Tool") or nil
+					o.tool.Visible = toolInst ~= nil
+					if toolInst then
+						o.tool.Text = toolInst.Name
+						o.tool.TextSize = ts
+						o.tool.TextColor3 = C.hover
+						o.tool.TextStrokeTransparency = strokeT
+						o.tool.Position = UDim2.fromOffset(cx, ly)
+					end
+
+					-- health
+					local hp = math.clamp(hum.Health / math.max(hum.MaxHealth, 1), 0, 1)
+					o.hpBg.Visible = s.health
+					o.hpFill.Visible = s.health
+					if s.health then
+						o.hpBg.Position = UDim2.fromOffset(x1 - 7, y1 - 1)
+						o.hpBg.Size = UDim2.fromOffset(5, height + 2)
+						o.hpFill.Position = UDim2.fromOffset(x1 - 6, y1 + height * (1 - hp))
+						o.hpFill.Size = UDim2.fromOffset(3, height * hp)
+						o.hpFill.BackgroundColor3 = Color3.fromHSV(hp * 0.33, 1, 1)
+					end
+					o.hpText.Visible = s.healthText
+					if s.healthText then
+						o.hpText.Text = tostring(math.floor(hum.Health))
+						o.hpText.TextSize = math.max(ts - 2, 8)
+						o.hpText.TextColor3 = C.white
+						o.hpText.TextStrokeTransparency = strokeT
+						o.hpText.Position = UDim2.fromOffset(x1 - (s.health and 10 or 4), y1 + height * (1 - hp))
+					end
+
+					-- skeleton
+					if s.skeleton then
+						local list = hum.RigType == Enum.HumanoidRigType.R15 and SKEL_R15 or SKEL_R6
+						for i, pr in ipairs(list) do
+							local ln = o.skel[i]
+							local a, b = char:FindFirstChild(pr[1]), char:FindFirstChild(pr[2])
+							if a and b then
+								local pa = cam:WorldToViewportPoint(a.Position)
+								local pb = cam:WorldToViewportPoint(b.Position)
+								if pa.Z > 0 and pb.Z > 0 then
+									ln.BackgroundColor3 = col
+									setLine(ln, Vector2.new(pa.X, pa.Y), Vector2.new(pb.X, pb.Y), 1.5)
+								else
+									ln.Visible = false
+								end
+							else
+								ln.Visible = false
+							end
+						end
+						for i = #list + 1, #o.skel do
+							o.skel[i].Visible = false
+						end
+					else
+						for i = 1, #o.skel do
+							o.skel[i].Visible = false
+						end
+					end
+
+					-- head dot
+					local headPart = char:FindFirstChild("Head")
+					o.dot.Visible = s.headDot and headPart ~= nil
+					if o.dot.Visible then
+						local hp2 = cam:WorldToViewportPoint(headPart.Position)
+						local d = math.max(4, height * 0.1)
+						o.dot.Size = UDim2.fromOffset(d, d)
+						o.dot.Position = UDim2.fromOffset(hp2.X, hp2.Y)
+						o.dot.BackgroundColor3 = col
+					end
+				else
+					hideDetails(o)
+					if s.arrows then
+						local center = vp / 2
+						local dir = Vector2.new(rp.X, rp.Y) - center
+						if not inFront then
+							dir = -dir
+						end
+						if dir.Magnitude < 1 then
+							dir = Vector2.new(0, 1)
+						end
+						dir = dir.Unit
+						local pos = center + dir * (math.min(vp.X, vp.Y) * 0.42)
+						o.arrow.Position = UDim2.fromOffset(pos.X, pos.Y)
+						o.arrow.Rotation = math.deg(math.atan2(dir.Y, dir.X)) + 45
+						o.arrow.BackgroundColor3 = col
+						o.arrow.Visible = true
+					else
+						o.arrow.Visible = false
+					end
+				end
+			end
+		end
+	end
+
+	function ESP.changed()
+		if ESP.onChange then
+			ESP.onChange()
+		end
+	end
+
+	function ESP.setEnabled(on)
+		ESP.s.enabled = on
+		if ESP.conn then
+			ESP.conn:Disconnect()
+			ESP.conn = nil
+		end
+		if on then
+			espLayer.Visible = true
+			for _, p in ipairs(Players:GetPlayers()) do
+				if p ~= LocalPlayer then
+					ESP.add(p)
+				end
+			end
+			ESP.conn = RunService.RenderStepped:Connect(function()
+				pcall(update)
+			end)
+		else
+			espLayer.Visible = false
+			for p in pairs(ESP.objs) do
+				ESP.remove(p)
+			end
+		end
+	end
+	onUnload(function()
+		ESP.setEnabled(false)
+	end)
+	bindConn(Players.PlayerAdded, function(p)
+		if ESP.s.enabled and p ~= LocalPlayer then
+			ESP.add(p)
+		end
+	end)
+	bindConn(Players.PlayerRemoving, function(p)
+		ESP.remove(p)
+	end)
+end
+
+-- ---------------------------------------------------------------- preview
+do
+	local PW, PH = 264, 372
+	local SW, SH = 232, 300
+	local pv = { open = false, t = 0 }
+
+	local function build()
+		local holder = new("Frame", {
+			Name = "EspPreview",
+			Position = UDim2.new(0.5, math.floor(barWidth(false) / 2) + 16, 0, M.PanelY),
+			Size = UDim2.fromOffset(PW, PH),
+			BackgroundTransparency = 1,
+			BorderSizePixel = 0,
+			Visible = false,
+			ZIndex = 6,
+		}, root)
+		local sc = new("UIScale", { Scale = 0.9 }, holder)
+		local shadows = makeShadow(holder, 26, true)
+		local card = new("CanvasGroup", {
+			Size = UDim2.fromScale(1, 1),
+			BackgroundTransparency = 1,
+			GroupTransparency = 1,
+			BorderSizePixel = 0,
+			ZIndex = 1,
+		}, holder)
+		corner(card, 26)
+		local st = glassStroke(card)
+		st.Transparency = 1
+		local bg = frame({ Size = UDim2.fromScale(1, 1), BackgroundColor3 = C.white, BackgroundTransparency = 0.08, ZIndex = 0 }, card)
+		local grad = new("UIGradient", { Rotation = 90 }, bg)
+		local setG = gradientSetter(grad)
+		Theme.bind(function(v, instant)
+			setG(v.panelTop, v.panelBot, instant and 0 or 0.3)
+		end)
+
+		-- header (drag handle) + close
+		local head = new("TextButton", {
+			Text = "",
+			AutoButtonColor = false,
+			BackgroundTransparency = 1,
+			BorderSizePixel = 0,
+			Size = UDim2.new(1, 0, 0, 52),
+			ZIndex = 2,
+		}, card)
+		label({
+			Text = "ESP preview",
+			Position = UDim2.fromOffset(20, 0),
+			Size = UDim2.new(1, -70, 1, 0),
+			Font = Enum.Font.GothamSemibold,
+			TextSize = 15,
+			ZIndex = 3,
+		}, card)
+		local closeB = new("TextButton", {
+			Text = "",
+			AutoButtonColor = false,
+			AnchorPoint = Vector2.new(1, 0.5),
+			Position = UDim2.new(1, -14, 0, 26),
+			Size = UDim2.fromOffset(30, 30),
+			BackgroundColor3 = C.white,
+			BackgroundTransparency = 0.86,
+			BorderSizePixel = 0,
+			ZIndex = 4,
+		}, card)
+		corner(closeB, 15)
+		buildIcon("cross", 14, closeB, rgb(236, 237, 241))
+		hoverable(closeB, closeB, 0.86, 0.76, 0.66)
+
+		-- drag by header
+		local start, startPos
+		dragArea(head, function(x, y)
+			if not start then
+				start = Vector2.new(x, y)
+				startPos = holder.AbsolutePosition
+			end
+			local p = startPos + (Vector2.new(x, y) - start)
+			holder.Position = UDim2.fromOffset(p.X / uiScaleValue, p.Y / uiScaleValue)
+		end, function()
+			start = nil
+		end, function()
+			start = nil
+		end)
+
+		-- stage with mock player
+		local stage = frame({
+			Position = UDim2.fromOffset(16, 56),
+			Size = UDim2.fromOffset(SW, SH),
+			BackgroundColor3 = C.black,
+			BackgroundTransparency = 0.45,
+			ClipsDescendants = true,
+			ZIndex = 2,
+		}, card)
+		corner(stage, 18)
+		stroke(stage, 0.9)
+		local fx = frame({ Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1 }, stage)
+
+		local parts = {}
+		local function part(cx, cy, w, h, r)
+			local f = frame({
+				AnchorPoint = Vector2.new(0.5, 0.5),
+				Position = UDim2.fromOffset(cx, cy),
+				Size = UDim2.fromOffset(w, h),
+				BackgroundColor3 = rgb(62, 64, 70),
+				BackgroundTransparency = 0.05,
+			}, fx)
+			corner(f, r)
+			local ol = stroke(f, 0, C.white, 1.5)
+			ol.Enabled = false
+			table.insert(parts, { f = f, ol = ol })
+		end
+		part(116, 62, 34, 34, 17)
+		part(116, 124, 54, 70, 10)
+		part(80, 126, 14, 66, 7)
+		part(152, 126, 14, 66, 7)
+		part(103, 208, 24, 84, 8)
+		part(129, 208, 24, 84, 8)
+
+		local BX, BY, BW, BH = 64, 40, 104, 216
+		local pts = {
+			head = Vector2.new(116, 62),
+			chest = Vector2.new(116, 100),
+			pelvis = Vector2.new(116, 158),
+			lsh = Vector2.new(96, 98),
+			rsh = Vector2.new(136, 98),
+			lel = Vector2.new(82, 128),
+			rel = Vector2.new(150, 128),
+			lh = Vector2.new(80, 158),
+			rh = Vector2.new(152, 158),
+			lk = Vector2.new(103, 206),
+			rk = Vector2.new(129, 206),
+			lf = Vector2.new(103, 248),
+			rf = Vector2.new(129, 248),
+		}
+		local SK = {
+			{ "head", "chest" }, { "chest", "pelvis" }, { "chest", "lsh" }, { "lsh", "lel" }, { "lel", "lh" },
+			{ "chest", "rsh" }, { "rsh", "rel" }, { "rel", "rh" },
+			{ "pelvis", "lk" }, { "lk", "lf" }, { "pelvis", "rk" }, { "rk", "rf" },
+		}
+
+		local function ln()
+			return frame({ AnchorPoint = Vector2.new(0.5, 0.5), BackgroundColor3 = C.white, Visible = false }, fx)
+		end
+		local function setL(f, a, b, th)
+			local dx, dy = b.X - a.X, b.Y - a.Y
+			f.Size = UDim2.fromOffset(math.sqrt(dx * dx + dy * dy), th)
+			f.Position = UDim2.fromOffset((a.X + b.X) / 2, (a.Y + b.Y) / 2)
+			f.Rotation = math.deg(math.atan2(dy, dx))
+			f.Visible = true
+		end
+
+		local skel = {}
+		for i = 1, #SK do
+			skel[i] = ln()
+		end
+		local tracer = ln()
+		local pbox = frame({ BackgroundColor3 = C.white, BackgroundTransparency = 1, Visible = false }, fx)
+		local pboxStroke = stroke(pbox, 0, C.white, 1.5)
+		local corners = {}
+		for i = 1, 8 do
+			corners[i] = frame({ BackgroundColor3 = C.white, Visible = false }, fx)
+		end
+		local function ptxt(text)
+			return label({
+				Text = text,
+				AnchorPoint = Vector2.new(0.5, 0),
+				Size = UDim2.fromOffset(160, 16),
+				TextXAlignment = Enum.TextXAlignment.Center,
+				Font = Enum.Font.GothamSemibold,
+				TextStrokeTransparency = 0.35,
+				Visible = false,
+			}, fx)
+		end
+		local nameT, distT, toolT = ptxt("Player"), ptxt("[42]"), ptxt("Sword")
+		local hpT = ptxt("100")
+		hpT.AnchorPoint = Vector2.new(1, 0.5)
+		hpT.TextXAlignment = Enum.TextXAlignment.Right
+		hpT.Size = UDim2.fromOffset(40, 14)
+		local hpBg = frame({ BackgroundColor3 = C.black, BackgroundTransparency = 0.4, Visible = false }, fx)
+		local hpFill = frame({ BackgroundColor3 = C.white, Visible = false }, fx)
+		local dot = frame({ AnchorPoint = Vector2.new(0.5, 0.5), BackgroundColor3 = C.white, Visible = false }, fx)
+		corner(dot, 99)
+		local arrow = frame({
+			AnchorPoint = Vector2.new(0.5, 0.5),
+			Position = UDim2.fromOffset(204, 38),
+			Size = UDim2.fromOffset(12, 12),
+			BackgroundColor3 = C.white,
+			Rotation = 45 - 40,
+			Visible = false,
+		}, fx)
+		corner(arrow, 3)
+		label({
+			Text = "Preview with sample values",
+			AnchorPoint = Vector2.new(0.5, 1),
+			Position = UDim2.new(0.5, 0, 1, -6),
+			Size = UDim2.fromOffset(200, 14),
+			TextXAlignment = Enum.TextXAlignment.Center,
+			TextSize = 10,
+			TextColor3 = C.sub,
+			ZIndex = 5,
+		}, stage)
+
+		local function draw(dt)
+			pv.t += dt
+			local s = ESP.s
+			local col = s.color
+			if s.rainbow then
+				col = Color3.fromHSV((pv.t * 0.25) % 1, 0.85, 1)
+			elseif s.teamColors then
+				col = rgb(90, 170, 255)
+			elseif s.visCheck then
+				col = (math.floor(pv.t / 1.5) % 2 == 0) and s.visColor or s.hidColor
+			end
+			local hp = 0.68 + 0.32 * math.sin(pv.t * 0.9)
+			local strokeT = s.textOutline and 0.35 or 1
+			local ts = s.textSize
+
+			for _, p in ipairs(parts) do
+				if s.chams then
+					p.f.BackgroundColor3 = col
+					p.f.BackgroundTransparency = s.chamsFill
+					p.ol.Enabled = true
+					p.ol.Color = col
+				else
+					p.f.BackgroundColor3 = rgb(62, 64, 70)
+					p.f.BackgroundTransparency = 0.05
+					p.ol.Enabled = false
+				end
+			end
+
+			pbox.Visible = s.box and (s.boxStyle == "Box" or s.boxFill)
+			if pbox.Visible then
+				pbox.Position = UDim2.fromOffset(BX, BY)
+				pbox.Size = UDim2.fromOffset(BW, BH)
+				pbox.BackgroundColor3 = col
+				pbox.BackgroundTransparency = s.boxFill and s.fillOpacity or 1
+				pboxStroke.Enabled = s.boxStyle == "Box"
+				pboxStroke.Color = col
+			end
+			local cornerOn = s.box and s.boxStyle == "Corner"
+			if cornerOn then
+				local len, th = 30, 2
+				local specs = {
+					{ BX, BY, len, th }, { BX, BY, th, len },
+					{ BX + BW - len, BY, len, th }, { BX + BW - th, BY, th, len },
+					{ BX, BY + BH - th, len, th }, { BX, BY + BH - len, th, len },
+					{ BX + BW - len, BY + BH - th, len, th }, { BX + BW - th, BY + BH - len, th, len },
+				}
+				for i = 1, 8 do
+					corners[i].Position = UDim2.fromOffset(specs[i][1], specs[i][2])
+					corners[i].Size = UDim2.fromOffset(specs[i][3], specs[i][4])
+					corners[i].BackgroundColor3 = col
+				end
+			end
+			for i = 1, 8 do
+				corners[i].Visible = cornerOn
+			end
+
+			nameT.Visible = s.name
+			if s.name then
+				nameT.Text = s.nameType == "Username" and "player_01" or "Player"
+				nameT.TextSize = ts
+				nameT.TextColor3 = col
+				nameT.TextStrokeTransparency = strokeT
+				nameT.Position = UDim2.fromOffset(116, BY - ts - 5)
+			end
+			local ly = BY + BH + 3
+			distT.Visible = s.distance
+			if s.distance then
+				distT.TextSize = ts
+				distT.TextColor3 = col
+				distT.TextStrokeTransparency = strokeT
+				distT.Position = UDim2.fromOffset(116, ly)
+				ly += ts + 1
+			end
+			toolT.Visible = s.tool
+			if s.tool then
+				toolT.TextSize = ts
+				toolT.TextColor3 = C.hover
+				toolT.TextStrokeTransparency = strokeT
+				toolT.Position = UDim2.fromOffset(116, ly)
+			end
+
+			hpBg.Visible = s.health
+			hpFill.Visible = s.health
+			if s.health then
+				hpBg.Position = UDim2.fromOffset(BX - 7, BY - 1)
+				hpBg.Size = UDim2.fromOffset(5, BH + 2)
+				hpFill.Position = UDim2.fromOffset(BX - 6, BY + BH * (1 - hp))
+				hpFill.Size = UDim2.fromOffset(3, BH * hp)
+				hpFill.BackgroundColor3 = Color3.fromHSV(hp * 0.33, 1, 1)
+			end
+			hpT.Visible = s.healthText
+			if s.healthText then
+				hpT.Text = tostring(math.floor(hp * 100))
+				hpT.TextSize = math.max(ts - 2, 8)
+				hpT.TextStrokeTransparency = strokeT
+				hpT.Position = UDim2.fromOffset(BX - (s.health and 10 or 4), BY + BH * (1 - hp))
+			end
+
+			for i, pr in ipairs(SK) do
+				if s.skeleton then
+					skel[i].BackgroundColor3 = col
+					setL(skel[i], pts[pr[1]], pts[pr[2]], 1.5)
+				else
+					skel[i].Visible = false
+				end
+			end
+			if s.tracers then
+				tracer.BackgroundColor3 = col
+				local from = Vector2.new(116, SH)
+				if s.tracerOrigin == "Center" then
+					from = Vector2.new(116, SH / 2)
+				elseif s.tracerOrigin == "Top" then
+					from = Vector2.new(116, 0)
+				elseif s.tracerOrigin == "Mouse" then
+					from = Vector2.new(190, SH * 0.7)
+				end
+				setL(tracer, from, Vector2.new(116, BY + BH), 1.5)
+			else
+				tracer.Visible = false
+			end
+			dot.Visible = s.headDot
+			if s.headDot then
+				dot.Position = UDim2.fromOffset(116, 62)
+				dot.Size = UDim2.fromOffset(8, 8)
+				dot.BackgroundColor3 = col
+			end
+			arrow.Visible = s.arrows
+			if s.arrows then
+				arrow.BackgroundColor3 = col
+			end
+		end
+
+		pv.holder, pv.card, pv.sc, pv.st, pv.shadows = holder, card, sc, st, shadows
+		pv.draw = draw
+		closeB.MouseButton1Click:Connect(function()
+			pv.close()
+		end)
+	end
+
+	function pv.show()
+		if not pv.holder then
+			build()
+		end
+		if pv.open then
+			return
+		end
+		pv.open = true
+		pv.holder.Visible = true
+		pv.sc.Scale = 0.9
+		tween(pv.card, 0.4, { GroupTransparency = 0 })
+		tween(pv.st, 0.4, { Transparency = 0 })
+		tween(pv.sc, 0.6, { Scale = 1 }, Enum.EasingStyle.Back)
+		for i, l in ipairs(pv.shadows) do
+			tween(l, 0.4, { BackgroundTransparency = SHADOW_T[i] })
+		end
+		pv.conn = RunService.RenderStepped:Connect(function(dt)
+			pv.draw(dt)
+		end)
+	end
+
+	function pv.close()
+		if not pv.open then
+			return
+		end
+		pv.open = false
+		if pv.conn then
+			pv.conn:Disconnect()
+			pv.conn = nil
+		end
+		tween(pv.card, 0.25, { GroupTransparency = 1 })
+		tween(pv.st, 0.25, { Transparency = 1 })
+		tween(pv.sc, 0.25, { Scale = 0.94 })
+		for _, l in ipairs(pv.shadows) do
+			tween(l, 0.2, { BackgroundTransparency = 1 })
+		end
+		task.delay(0.28, function()
+			if not pv.open then
+				pv.holder.Visible = false
+			end
+		end)
+	end
+	onUnload(function()
+		if pv.conn then
+			pv.conn:Disconnect()
+		end
+	end)
+	ESP.preview = pv
+end
+
+-- --------------------------------------------------------------- ESP tab
+do
+	local page = Tabs.ESP.Content
+	local s = ESP.s
+	local function tog(g, key, text, field, desc)
+		return COMP.Toggle(g, {
+			key = "esp." .. key,
+			text = text,
+			desc = desc,
+			default = s[field],
+			callback = function(on)
+				s[field] = on
+				ESP.changed()
+			end,
+		})
+	end
+	local function drop(g, key, text, field, options)
+		return COMP.Dropdown(g, {
+			key = "esp." .. key,
+			text = text,
+			options = options,
+			default = s[field],
+			callback = function(v)
+				s[field] = v
+			end,
+		})
+	end
+	local function color(g, key, text, field)
+		return COMP.ColorPicker(g, {
+			key = "esp." .. key,
+			text = text,
+			default = s[field],
+			callback = function(c)
+				s[field] = c
+			end,
+		})
+	end
+
+	local gMain = COMP.Group(page, "ESP")
+	COMP.Toggle(gMain, {
+		key = "esp.enabled",
+		text = "Enable ESP",
+		desc = "Master switch for everything below",
+		default = false,
+		callback = function(on)
+			ESP.setEnabled(on)
+		end,
+	})
+	COMP.Button(gMain, {
+		text = "ESP preview",
+		desc = "Opens a live preview panel with sample values",
+		buttonText = "Open",
+		callback = function()
+			if ESP.preview.open then
+				ESP.preview.close()
+			else
+				ESP.preview.show()
+			end
+		end,
+	})
+	tog(gMain, "team", "Team check", "teamCheck", "Hide players on your team")
+	tog(gMain, "teamcolors", "Team colors", "teamColors", "Use each team's own color")
+	COMP.Slider(gMain, {
+		key = "esp.maxdist",
+		text = "Max distance",
+		min = 100,
+		max = 5000,
+		step = 100,
+		default = 5000,
+		format = function(v)
+			return v >= 5000 and "Unlimited" or (math.floor(v) .. " studs")
+		end,
+		callback = function(v)
+			s.maxDist = v
+		end,
+	})
+
+	local gBox = COMP.Group(page, "Boxes")
+	tog(gBox, "box", "Box", "box")
+	drop(gBox, "boxstyle", "Box style", "boxStyle", { "Box", "Corner" })
+	tog(gBox, "boxfill", "Box fill", "boxFill")
+	COMP.Slider(gBox, {
+		key = "esp.fillopacity",
+		text = "Fill transparency",
+		min = 0.3,
+		max = 0.95,
+		step = 0.05,
+		default = s.fillOpacity,
+		callback = function(v)
+			s.fillOpacity = v
+		end,
+	})
+
+	local gInfo = COMP.Group(page, "Info")
+	tog(gInfo, "name", "Name", "name")
+	drop(gInfo, "nametype", "Name type", "nameType", { "Display name", "Username" })
+	tog(gInfo, "health", "Health bar", "health")
+	tog(gInfo, "healthtext", "Health number", "healthText")
+	tog(gInfo, "distance", "Distance", "distance")
+	tog(gInfo, "tool", "Equipped tool", "tool")
+	tog(gInfo, "headdot", "Head dot", "headDot")
+
+	local gLines = COMP.Group(page, "Lines")
+	tog(gLines, "tracers", "Tracers", "tracers")
+	drop(gLines, "tracerorigin", "Tracer origin", "tracerOrigin", { "Bottom", "Center", "Top", "Mouse" })
+	tog(gLines, "skeleton", "Skeleton", "skeleton")
+	tog(gLines, "arrows", "Off-screen arrows", "arrows", "Points toward players you can't see")
+
+	local gCham = COMP.Group(page, "Chams")
+	tog(gCham, "chams", "Chams", "chams", "Colors the whole player model")
+	tog(gCham, "chamsthrough", "Through walls", "chamsThrough")
+	COMP.Slider(gCham, {
+		key = "esp.chamsfill",
+		text = "Fill transparency",
+		min = 0,
+		max = 1,
+		step = 0.05,
+		default = s.chamsFill,
+		callback = function(v)
+			s.chamsFill = v
+		end,
+	})
+
+	local gCol = COMP.Group(page, "Colors and text")
+	color(gCol, "color", "ESP color", "color")
+	tog(gCol, "vischeck", "Visibility check", "visCheck", "Changes color when the player is behind a wall")
+	color(gCol, "viscolor", "Visible color", "visColor")
+	color(gCol, "hidcolor", "Hidden color", "hidColor")
+	tog(gCol, "rainbow", "Rainbow", "rainbow")
+	COMP.Slider(gCol, {
+		key = "esp.textsize",
+		text = "Text size",
+		min = 10,
+		max = 20,
+		step = 1,
+		default = s.textSize,
+		callback = function(v)
+			s.textSize = v
+		end,
+	})
+	tog(gCol, "textoutline", "Text outline", "textOutline")
+end
+
+--========================================================================
+-- SORU MACROS  (rebuilt from the Kevin's Taco Shop v5 values)
+--========================================================================
+local Soru = {
+	on = false,
+	detect = true,
+	onKey = true,
+	pressKey = Enum.KeyCode.X,
+	delay = 50,
+	rspam = false,
+	rgap = 30,
+	soruKey = nil, -- nil = auto
+	last = 0,
+	conns = {},
+	rBusy = false,
+}
+
+do
+	local VIM = game:GetService("VirtualInputManager")
+
+	local function typing()
+		return UserInputService:GetFocusedTextBox() ~= nil
+	end
+
+	local function tap(key)
+		pcall(function()
+			VIM:SendKeyEvent(true, key, false, game)
+			task.wait(0.02)
+			VIM:SendKeyEvent(false, key, false, game)
+		end)
+	end
+
+	-- best-effort: find the key shown next to the Soru ability in the game UI, else Q
+	local autoCache, autoStamp = nil, 0
+	function Soru.autoKey()
+		if autoCache and os.clock() - autoStamp < 5 then
+			return autoCache
+		end
+		local found
+		pcall(function()
+			local pg = LocalPlayer:FindFirstChild("PlayerGui")
+			if not pg then
+				return
+			end
+			for _, d in ipairs(pg:GetDescendants()) do
+				if d:IsA("TextLabel") or d:IsA("TextButton") then
+					if string.lower(d.Text) == "soru" or string.lower(d.Name) == "soru" then
+						local scope = d.Parent
+						if scope then
+							for _, t in ipairs(scope:GetDescendants()) do
+								if (t:IsA("TextLabel") or t:IsA("TextButton")) and #t.Text == 1 then
+									local k = Enum.KeyCode[string.upper(t.Text)]
+									if k then
+										found = k
+										return
+									end
+								end
+							end
+						end
+					end
+				end
+			end
+		end)
+		autoCache = found or Enum.KeyCode.Q
+		autoStamp = os.clock()
+		return autoCache
+	end
+
+	function Soru.currentKey()
+		return Soru.soruKey or Soru.autoKey()
+	end
+
+	function Soru.trigger()
+		if not Soru.on then
+			return
+		end
+		local now = os.clock()
+		if now - Soru.last < 0.6 then
+			return
+		end
+		Soru.last = now
+		task.delay(Soru.delay / 1000, function()
+			if Soru.on then
+				tap(Soru.pressKey)
+			end
+		end)
+	end
+
+	local function clearConns()
+		for _, c in ipairs(Soru.conns) do
+			c:Disconnect()
+		end
+		Soru.conns = {}
+	end
+
+	local function hookCharacter(char)
+		clearConns()
+		task.spawn(function()
+			local hum = char:WaitForChild("Humanoid", 8)
+			local animator = hum and (hum:FindFirstChildOfClass("Animator") or hum:WaitForChild("Animator", 5))
+			if animator then
+				table.insert(
+					Soru.conns,
+					animator.AnimationPlayed:Connect(function(track)
+						if not Soru.detect then
+							return
+						end
+						local n = string.lower((track.Animation and track.Animation.Name or "") .. " " .. track.Name)
+						if string.find(n, "flashstep", 1, true) then
+							Soru.trigger()
+						end
+					end)
+				)
+			end
+			local function hookSound(snd)
+				if snd:IsA("Sound") then
+					local n = string.lower(snd.Name)
+					if string.find(n, "flashstep", 1, true) or string.find(n, "soru", 1, true) then
+						table.insert(
+							Soru.conns,
+							snd.Played:Connect(function()
+								if Soru.detect then
+									Soru.trigger()
+								end
+							end)
+						)
+					end
+				end
+			end
+			for _, d in ipairs(char:GetDescendants()) do
+				hookSound(d)
+			end
+			table.insert(Soru.conns, char.DescendantAdded:Connect(hookSound))
+		end)
+	end
+	if LocalPlayer.Character then
+		hookCharacter(LocalPlayer.Character)
+	end
+	bindConn(LocalPlayer.CharacterAdded, hookCharacter)
+	onUnload(clearConns)
+
+	bindConn(UserInputService.InputBegan, function(input)
+		if not Soru.on or typing() then
+			return
+		end
+		if input.UserInputType ~= Enum.UserInputType.Keyboard then
+			return
+		end
+		if Soru.onKey and input.KeyCode == Soru.currentKey() then
+			Soru.trigger()
+		end
+		if Soru.rspam and input.KeyCode == Enum.KeyCode.R and not Soru.rBusy then
+			Soru.rBusy = true
+			task.spawn(function()
+				while Soru.on and Soru.rspam and UserInputService:IsKeyDown(Enum.KeyCode.R) and not typing() do
+					tap(Enum.KeyCode.R)
+					task.wait(Soru.rgap / 1000)
+				end
+				Soru.rBusy = false
+			end)
+		end
+	end)
+end
+
+-- --------------------------------------------------------- Macros tab
+do
+	local page = Tabs.Macros.Content
+	local function keyLabel(k)
+		return (k.Name:gsub("(%l)(%u)", "%1 %2"))
+	end
+
+	local g = COMP.Group(page, "Soru macro")
+	COMP.Toggle(g, {
+		key = "macros.soru.on",
+		text = "Soru macro",
+		desc = "Presses your key right after Soru / Flash Step",
+		default = false,
+		callback = function(on)
+			Soru.on = on
+		end,
+	})
+	COMP.Toggle(g, {
+		key = "macros.soru.detect",
+		text = "Detect Flash Step",
+		desc = "Starts on Flash Step animations and sounds",
+		default = true,
+		callback = function(on)
+			Soru.detect = on
+		end,
+	})
+	COMP.Toggle(g, {
+		key = "macros.soru.onkey",
+		text = "Start on my Soru key",
+		desc = "Starts when you press your Soru key",
+		default = true,
+		callback = function(on)
+			Soru.onKey = on
+		end,
+	})
+
+	-- Soru key: Auto (read from the game) or a manual key; Backspace goes back to Auto
+	do
+		local r = newRow(g, 60)
+		rowLabel(r, "Soru key", "Auto reads it from the game. Backspace = Auto", 0.55)
+		local function text()
+			return Soru.soruKey and keyLabel(Soru.soruKey) or ("Auto (" .. keyLabel(Soru.autoKey()) .. ")")
+		end
+		local btn = makeButton(r, text(), "ghost", 140, 32, {
+			AnchorPoint = Vector2.new(1, 0.5),
+			Position = UDim2.new(1, -16, 0.5, 0),
+		})
+		local function setKey(k, fire)
+			Soru.soruKey = k
+			btn.SetText(text())
+			if fire then
+				Cfg.dirty()
+			end
+		end
+		btn.Button.MouseButton1Click:Connect(function()
+			if state.listening then
+				return
+			end
+			state.listening = true
+			btn.SetText("Press a key...")
+			local conn
+			conn = UserInputService.InputBegan:Connect(function(input)
+				if input.UserInputType ~= Enum.UserInputType.Keyboard then
+					return
+				end
+				conn:Disconnect()
+				task.delay(0.1, function()
+					state.listening = false
+				end)
+				if input.KeyCode == Enum.KeyCode.Backspace then
+					setKey(nil, true)
+				elseif input.KeyCode ~= Enum.KeyCode.Escape then
+					setKey(input.KeyCode, true)
+				else
+					btn.SetText(text())
+				end
+			end)
+		end)
+		Cfg.add("macros.soru.key", function()
+			return Soru.soruKey and Soru.soruKey.Name or "Auto"
+		end, function(n)
+			setKey(Enum.KeyCode[n], false)
+		end)
+	end
+
+	COMP.Keybind(g, {
+		key = "macros.soru.press",
+		text = "Key to press",
+		default = Soru.pressKey,
+		callback = function(k)
+			Soru.pressKey = k
+		end,
+	})
+	COMP.Slider(g, {
+		key = "macros.soru.delay",
+		text = "Delay after Soru",
+		min = 0,
+		max = 300,
+		step = 5,
+		default = Soru.delay,
+		suffix = " ms",
+		callback = function(v)
+			Soru.delay = v
+		end,
+	})
+
+	local gR = COMP.Group(page, "R spam")
+	COMP.Toggle(gR, {
+		key = "macros.soru.rspam",
+		text = "R spam",
+		desc = "Spams R while you hold it (needs the Soru macro on)",
+		default = false,
+		callback = function(on)
+			Soru.rspam = on
+		end,
+	})
+	COMP.Slider(gR, {
+		key = "macros.soru.rgap",
+		text = "R spam gap",
+		min = 10,
+		max = 100,
+		step = 5,
+		default = Soru.rgap,
+		suffix = " ms",
+		callback = function(v)
+			Soru.rgap = v
+		end,
+	})
+end
+
+--========================================================================
+-- SETTINGS PAGE
+--========================================================================
+local autoToggle
+
+local function doUnload()
+	toast("Unloading " .. CONFIG.Name, "Restoring your game...", 1.5)
+	setShown(false)
+	task.delay(0.7, function()
+		Unload()
+	end)
+end
+
+do
+	local page = Tabs.Settings.Content
+
+	-- ---- performance: frame rate
+	local gFps = COMP.Group(page, "Frame rate")
+	COMP.Toggle(gFps, {
+		key = "perf.uncap",
+		text = "Uncap FPS",
+		desc = "Removes the frame rate limit",
+		default = false,
+		callback = function(on)
+			local quiet = Cfg.suppress
+			Perf.fps.uncap = on
+			task.spawn(function()
+				local method = Perf.applyFps()
+				if not method then
+					if not quiet then
+						toast("FPS unlock unavailable", "Your executor has no setfpscap or FFlag support.", 4)
+					end
+					return
+				end
+				if on and not quiet then
+					task.wait(0.8)
+					local fps = Perf.measure(1.2)
+					if fps > 75 then
+						toast("FPS unlocked", "Running at about " .. fps .. " FPS.")
+					else
+						toast("Cap applied, FPS still ~" .. fps, "VSync, your monitor or the game may be limiting it.", 4.5)
+					end
+				end
+			end)
+		end,
+	})
+	COMP.Slider(gFps, {
+		key = "perf.limit",
+		text = "FPS limit",
+		min = 30,
+		max = 360,
+		step = 10,
+		default = 60,
+		suffix = " fps",
+		callback = function(v)
+			Perf.fps.limit = v
+			if not Perf.fps.uncap then
+				Perf.applyFps()
+			end
+		end,
+	})
+	COMP.Toggle(gFps, {
+		key = "perf.hud",
+		text = "FPS and ping counter",
+		desc = "Small overlay in the top left",
+		default = false,
+		callback = function(on)
+			Hud.set(on)
+		end,
+	})
+
+	-- ---- performance: rendering
+	local gRender = COMP.Group(page, "Rendering")
+	local q = 10
+	pcall(function()
+		q = math.clamp(settings().Rendering.QualityLevel.Value, 1, 21)
+	end)
+	COMP.Slider(gRender, {
+		key = "perf.quality",
+		text = "Graphics quality",
+		min = 1,
+		max = 21,
+		step = 1,
+		default = q,
+		format = function(v)
+			return "Level " .. math.floor(v + 0.5)
+		end,
+		callback = function(v)
+			Perf.quality(v)
+		end,
+	})
+	COMP.Toggle(gRender, {
+		key = "perf.shadows",
+		text = "Disable shadows",
+		callback = function(on)
+			Perf.shadows(on)
+		end,
+	})
+	COMP.Toggle(gRender, {
+		key = "perf.postfx",
+		text = "Disable post-processing",
+		desc = "Bloom, blur, sun rays, depth of field",
+		callback = function(on)
+			Perf.postfx(on)
+		end,
+	})
+	COMP.Toggle(gRender, {
+		key = "perf.particles",
+		text = "Disable particles and effects",
+		desc = "Particles, trails, beams, fire, smoke",
+		callback = function(on)
+			Perf.world("particles", on)
+		end,
+	})
+	COMP.Toggle(gRender, {
+		noConfig = true,
+		text = "Disable 3D rendering",
+		desc = "Black world, big FPS boost while AFK",
+		callback = function(on)
+			Perf.render3d(on)
+		end,
+	})
+
+	-- ---- performance: world
+	local gWorld = COMP.Group(page, "World")
+	COMP.Toggle(gWorld, {
+		key = "perf.smooth",
+		text = "Smooth plastic materials",
+		desc = "Flattens every material for less GPU load",
+		callback = function(on)
+			Perf.world("smooth", on)
+		end,
+	})
+	COMP.Toggle(gWorld, {
+		key = "perf.textures",
+		text = "Hide textures and decals",
+		callback = function(on)
+			Perf.world("textures", on)
+		end,
+	})
+	COMP.Toggle(gWorld, {
+		key = "perf.terrain",
+		text = "Simplify terrain and water",
+		desc = "No grass decoration, flat water",
+		callback = function(on)
+			Perf.terrain(on)
+		end,
+	})
+	COMP.Button(gWorld, {
+		text = "Clear memory",
+		desc = "Runs a garbage collection pass",
+		buttonText = "Clear",
+		callback = function()
+			task.spawn(function()
+				local ok, before, after = pcall(Perf.clearMemory)
+				if ok then
+					toast("Memory cleared", string.format("%d MB -> %d MB", before, after))
+				else
+					toast("Couldn't clear memory", "Not supported here.")
+				end
+			end)
+		end,
+	})
+
+	-- ---- appearance
+	local gTheme = COMP.Group(page, "Appearance")
+	local accentPicker, swatches, rainbowToggle
+	local rainbowConn
+	local function setRainbow(on)
+		if rainbowConn then
+			rainbowConn:Disconnect()
+			rainbowConn = nil
+		end
+		Theme.values.rainbow = on
+		if on then
+			local acc = 0
+			rainbowConn = RunService.Heartbeat:Connect(function(dt)
+				acc += dt
+				if acc < 0.05 then
+					return
+				end
+				acc = 0
+				Theme.apply({ accent = Color3.fromHSV((os.clock() * 0.08) % 1, 0.55, 1), preset = "Custom" }, true)
+			end)
+		end
+	end
+	onUnload(function()
+		if rainbowConn then
+			rainbowConn:Disconnect()
+		end
+	end)
+
+	local items = {}
+	for _, p in ipairs(PRESETS) do
+		table.insert(items, { name = p.name, color1 = p.accent, color2 = p.panelBot })
+	end
+	swatches = COMP.Swatches(gTheme, {
+		key = "theme.preset",
+		text = "Theme",
+		items = items,
+		default = "Glass",
+		callback = function(name)
+			if rainbowToggle and rainbowToggle.Get() then
+				rainbowToggle.Set(false, true)
+				setRainbow(false)
+			end
+			Theme.setPreset(name)
+			if accentPicker then
+				accentPicker.Set(Theme.values.accent, true)
+			end
+		end,
+	})
+	accentPicker = COMP.ColorPicker(gTheme, {
+		key = "theme.accent",
+		skip = function()
+			return Theme.values.preset ~= "Custom"
+		end,
+		text = "Accent color",
+		default = Theme.values.accent,
+		callback = function(c)
+			if rainbowToggle and rainbowToggle.Get() then
+				rainbowToggle.Set(false, true)
+				setRainbow(false)
+			end
+			Theme.apply({ accent = c, preset = "Custom" })
+			swatches.Set(nil)
+		end,
+	})
+	rainbowToggle = COMP.Toggle(gTheme, {
+		key = "theme.rainbow",
+		text = "Rainbow accent",
+		desc = "Cycles the accent colour",
+		callback = setRainbow,
+	})
+	COMP.Slider(gTheme, {
+		key = "theme.opacity",
+		text = "Glass opacity",
+		min = 50,
+		max = 100,
+		step = 1,
+		default = math.floor((1 - Theme.values.alpha) * 100 + 0.5),
+		suffix = "%",
+		callback = function(v)
+			Theme.apply({ alpha = 1 - v / 100 })
+		end,
+	})
+
+	-- ---- effects
+	local gFx = COMP.Group(page, "Effects")
+	COMP.Toggle(gFx, {
+		key = "fx.snow",
+		text = "Snow",
+		desc = "Falling snow over the screen while the UI is open",
+		callback = function(on)
+			Snow.enabled = on
+			Snow.refresh()
+		end,
+	})
+	COMP.Slider(gFx, {
+		key = "fx.snowAmount",
+		text = "Snow amount",
+		min = 10,
+		max = 100,
+		step = 5,
+		default = 50,
+		suffix = "%",
+		callback = function(v)
+			Snow.amount = v / 100
+			Snow.build(math.floor(Snow.max * Snow.amount + 0.5))
+		end,
+	})
+	COMP.Slider(gFx, {
+		key = "fx.snowSpeed",
+		text = "Snow speed",
+		min = 0.3,
+		max = 3,
+		step = 0.1,
+		default = 1,
+		suffix = "x",
+		callback = function(v)
+			Snow.speed = v
+		end,
+	})
+
+	-- ---- interface
+	local gUi = COMP.Group(page, "Interface")
+	COMP.Keybind(gUi, {
+		key = "ui.key",
+		text = "Toggle key",
+		default = CONFIG.ToggleKey,
+		callback = function(key)
+			CONFIG.ToggleKey = key
+		end,
+	})
+	COMP.Slider(gUi, {
+		key = "ui.scale",
+		text = "UI scale",
+		min = 80,
+		max = 130,
+		step = 5,
+		default = 100,
+		suffix = "%",
+		callback = function(v)
+			setUiScale(v / 100)
+		end,
+	})
+
+	-- ---- config
+	local gCfg = COMP.Group(page, "Config")
+	local importInput
+	autoToggle = COMP.Toggle(gCfg, {
+		text = "Auto config",
+		desc = "Saves your settings and loads them every time you execute",
+		default = false,
+		callback = function(on)
+			if on and not Cfg.canFile() then
+				toast("Auto config unavailable", "Your executor can't read or write files.", 3.5)
+				autoToggle.Set(false, true)
+				return
+			end
+			Cfg.auto = on
+			Cfg.saveFile()
+			toast(on and "Auto config on" or "Auto config off", on and "Settings save automatically." or nil)
+		end,
+	})
+	COMP.Button(gCfg, {
+		text = "Copy config",
+		desc = "Copies a code with all your settings",
+		buttonText = "Copy",
+		callback = function()
+			local code = Cfg.encode()
+			if Cfg.copy(code) then
+				toast("Config copied", "Paste the code anywhere to share it.")
+			else
+				importInput.Box.Text = code
+				toast("Clipboard unavailable", "The code is in the box below, copy it from there.", 4)
+			end
+		end,
+	})
+	importInput = COMP.Input(gCfg, {
+		text = "Import config",
+		desc = "Paste a config code (starts with KW1:)",
+		placeholder = "KW1:...",
+		buttonText = "Import",
+		callback = function(text)
+			local data = Cfg.decode(text)
+			if not data then
+				toast("Invalid config code", "A config code starts with KW1:")
+				return
+			end
+			local n = Cfg.apply(data)
+			Cfg.dirty()
+			toast("Config imported", n .. " settings applied")
+		end,
+	})
+
+	-- ---- script
+	local gScript = COMP.Group(page, "Script")
+	local armed = false
+	COMP.Button(gScript, {
+		text = "Unload script",
+		desc = "Restores your game and removes the UI",
+		buttonText = "Unload",
+		style = "danger",
+		callback = function(btn)
+			if armed then
+				armed = false
+				doUnload()
+				return
+			end
+			armed = true
+			btn.SetText("Confirm")
+			task.delay(3, function()
+				if armed then
+					armed = false
+					btn.SetText("Unload")
+				end
+			end)
+		end,
+	})
+end
+
+--========================================================================
+-- ENVIRONMENT PAGE
+--========================================================================
+do
+	local page = Tabs.Environment.Content
+
+	local function clockText(v)
+		local h = math.floor(v)
+		local m = math.floor((v - h) * 60 + 0.5)
+		if m == 60 then
+			h += 1
+			m = 0
+		end
+		return string.format("%02d:%02d", h % 24, m)
+	end
+
+	-- ---- time of day
+	local gTime = COMP.Group(page, "Time of day")
+	Env.ui.time = COMP.Segmented(gTime, {
+		key = "env.preset",
+		noReset = true,
+		text = "Preset",
+		options = TIME_NAMES,
+		default = false,
+		callback = function(name)
+			local p = TIMES[name].light
+			Env.timePreset(name)
+			Env.ui.timeSlider.Set(p.ClockTime, true)
+			Env.ui.brightness.Set(p.Brightness, true)
+			Env.ui.exposure.Set(p.ExposureCompensation, true)
+			Env.ui.ambient.Set(p.OutdoorAmbient, true)
+		end,
+	})
+	Env.ui.timeSlider = COMP.Slider(gTime, {
+		key = "env.time",
+		noReset = true,
+		text = "Time",
+		min = 0,
+		max = 24,
+		step = 0.1,
+		default = Lighting.ClockTime % 24,
+		format = clockText,
+		callback = function(v)
+			Env.set({ ClockTime = v })
+			Env.useDefaultSky()
+			Env.syncAll()
+			Env.ui.time.Clear()
+		end,
+	})
+	COMP.Toggle(gTime, {
+		key = "env.lock",
+		noReset = true,
+		text = "Lock environment",
+		desc = "Keeps your settings when the game tries to change them",
+		default = true,
+		callback = function(on)
+			Env.lock = on
+		end,
+	})
+	COMP.Toggle(gTime, {
+		key = "env.override",
+		noReset = true,
+		text = "Override game visuals",
+		desc = "Presets replace the game's own skybox, atmosphere and color grading",
+		default = true,
+		callback = function(on)
+			Env.setOverride(on)
+		end,
+	})
+
+	-- ---- sky
+	local gSky = COMP.Group(page, "Sky")
+	Env.ui.sky = COMP.Dropdown(gSky, {
+		key = "env.sky",
+		noReset = true,
+		text = "Sky theme",
+		options = SKY_NAMES,
+		default = "Game default",
+		callback = function(name)
+			Env.skyTheme(name)
+		end,
+	})
+	COMP.Input(gSky, {
+		text = "Custom skybox",
+		desc = "1 asset ID for all faces, or 6 (Bk Dn Ft Lf Rt Up)",
+		placeholder = "IDs separated by spaces or commas",
+		buttonText = "Apply",
+		callback = function(text)
+			if Env.customSky(text) then
+				toast("Skybox applied")
+			else
+				toast("Invalid IDs", "Paste 1 or 6 numeric asset IDs.")
+			end
+		end,
+	})
+	local cloudsNow = Env.getClouds(false)
+	COMP.Toggle(gSky, {
+		key = "env.clouds",
+		noReset = true,
+		text = "Clouds",
+		default = cloudsNow and cloudsNow.Enabled or false,
+		callback = function(on)
+			Env.clouds(on, nil)
+		end,
+	})
+	COMP.Slider(gSky, {
+		key = "env.cover",
+		noReset = true,
+		text = "Cloud cover",
+		min = 0,
+		max = 1,
+		step = 0.05,
+		default = cloudsNow and cloudsNow.Cover or 0.5,
+		callback = function(v)
+			Env.clouds(nil, v)
+		end,
+	})
+	COMP.Toggle(gSky, {
+		key = "env.domes",
+		noReset = true,
+		text = "Hide sky domes",
+		desc = "Hides fake sky meshes while presets are on",
+		default = false,
+		callback = function(on)
+			Env.hideDomes = on
+			Env.refreshDomes()
+		end,
+	})
+
+	-- ---- lighting
+	local gLight = COMP.Group(page, "Lighting")
+	Env.ui.brightness = COMP.Slider(gLight, {
+		key = "env.brightness",
+		noReset = true,
+		text = "Brightness",
+		min = 0,
+		max = 10,
+		step = 0.1,
+		default = math.clamp(Lighting.Brightness, 0, 10),
+		callback = function(v)
+			Env.set({ Brightness = v })
+		end,
+	})
+	Env.ui.exposure = COMP.Slider(gLight, {
+		key = "env.exposure",
+		noReset = true,
+		text = "Exposure",
+		min = -3,
+		max = 3,
+		step = 0.1,
+		default = math.clamp(Lighting.ExposureCompensation, -3, 3),
+		callback = function(v)
+			Env.set({ ExposureCompensation = v })
+		end,
+	})
+	Env.ui.ambient = COMP.ColorPicker(gLight, {
+		key = "env.ambient",
+		noReset = true,
+		text = "Ambient light",
+		default = Lighting.OutdoorAmbient,
+		callback = function(c)
+			Env.set({ Ambient = c, OutdoorAmbient = c })
+		end,
+	})
+	Env.ui.fog = COMP.Slider(gLight, {
+		key = "env.fog",
+		noReset = true,
+		text = "Fog distance",
+		min = 100,
+		max = 5000,
+		step = 50,
+		default = Lighting.FogEnd >= 5000 and 5000 or math.max(100, Lighting.FogEnd),
+		format = function(v)
+			if v >= 5000 then
+				return "Off"
+			end
+			return math.floor(v) .. " studs"
+		end,
+		callback = function(v)
+			if v >= 5000 then
+				Env.set({ FogEnd = 100000, FogStart = 0 })
+			else
+				Env.set({ FogEnd = v, FogStart = 0 })
+			end
+		end,
+	})
+	Env.ui.fogColor = COMP.ColorPicker(gLight, {
+		key = "env.fogColor",
+		noReset = true,
+		text = "Fog color",
+		default = Lighting.FogColor,
+		callback = function(c)
+			Env.set({ FogColor = c })
+		end,
+	})
+
+	-- ---- reset
+	local gReset = COMP.Group(page, "Reset")
+	COMP.Button(gReset, {
+		text = "Reset environment",
+		desc = "Puts lighting, sky and clouds back to the game's own",
+		buttonText = "Reset",
+		callback = function()
+			Env.reset()
+			Env.ui.time.Clear()
+			Env.ui.timeSlider.Set(Lighting.ClockTime % 24, true)
+			Env.ui.sky.Set("Game default", true)
+			Env.ui.brightness.Set(math.clamp(Lighting.Brightness, 0, 10), true)
+			Env.ui.exposure.Set(math.clamp(Lighting.ExposureCompensation, -3, 3), true)
+			Env.ui.ambient.Set(Lighting.OutdoorAmbient, true)
+			Env.ui.fog.Set(Lighting.FogEnd >= 5000 and 5000 or math.max(100, Lighting.FogEnd), true)
+			Env.ui.fogColor.Set(Lighting.FogColor, true)
+			toast("Environment reset")
+		end,
+	})
+end
+
+--========================================================================
+-- LOADER  (clear glass loading screen -> question -> profile -> bar)
+--========================================================================
+local function runLoader()
+	local overlay = new("Frame", {
+		Name = "Loader",
+		Size = UDim2.fromScale(1, 1),
+		BackgroundColor3 = rgb(6, 8, 14),
+		BackgroundTransparency = 1,
+		ZIndex = 20,
+		Active = true,
+		BorderSizePixel = 0,
+	}, gui)
+	-- light vignette: the game stays visible (blurred) through the middle
+	new("UIGradient", {
+		Rotation = 90,
+		Transparency = NumberSequence.new({
+			NumberSequenceKeypoint.new(0, 0.5),
+			NumberSequenceKeypoint.new(0.5, 0.74),
+			NumberSequenceKeypoint.new(1, 0.5),
+		}),
+	}, overlay)
+	tween(overlay, 0.9, { BackgroundTransparency = 0 })
+	tween(blur, 1.1, { Size = 26 })
+
+	local alive = true
+
+	local function glassCard(w, h, posY, kind)
+		local holder = new("Frame", {
+			AnchorPoint = Vector2.new(0.5, 0.5),
+			Position = UDim2.new(0.5, 0, 0.5, posY),
+			Size = UDim2.fromOffset(w, h),
+			BackgroundTransparency = 1,
+			BorderSizePixel = 0,
+			Visible = false,
+		}, overlay)
+		local sc = new("UIScale", { Scale = 0.92 }, holder)
+		local shadows = makeShadow(holder, 28, true)
+		local card = new("CanvasGroup", {
+			Size = UDim2.fromScale(1, 1),
+			BackgroundTransparency = 1,
+			GroupTransparency = 1,
+			BorderSizePixel = 0,
+			ZIndex = 1,
+		}, holder)
+		corner(card, 28)
+		local st = glassStroke(card)
+		st.Transparency = 1
+		local bg = frame({
+			Size = UDim2.fromScale(1, 1),
+			BackgroundColor3 = C.white,
+			BackgroundTransparency = 0.08,
+			ZIndex = 0,
+		}, card)
+		local grad = new("UIGradient", { Rotation = 90 }, bg)
+		local setG = gradientSetter(grad)
+		Theme.bind(function(v, instant)
+			if kind == "panel" then
+				setG(v.panelTop, v.panelBot, instant and 0 or 0.3)
+			else
+				setG(v.barTop, v.barBot, instant and 0 or 0.3)
+			end
+		end)
+		local obj = { Card = card }
+		function obj.Show()
+			holder.Visible = true
+			tween(card, 0.55, { GroupTransparency = 0 })
+			tween(st, 0.55, { Transparency = 0 })
+			tween(sc, 0.8, { Scale = 1 }, Enum.EasingStyle.Back)
+			for i, l in ipairs(shadows) do
+				tween(l, 0.55, { BackgroundTransparency = SHADOW_T[i] })
+			end
+		end
+		function obj.Hide()
+			tween(card, 0.35, { GroupTransparency = 1 })
+			tween(st, 0.35, { Transparency = 1 })
+			tween(sc, 0.35, { Scale = 0.95 })
+			for _, l in ipairs(shadows) do
+				tween(l, 0.3, { BackgroundTransparency = 1 })
+			end
+			task.delay(0.4, function()
+				holder.Visible = false
+			end)
+		end
+		return obj
+	end
+
+	-- ---------- stage: logo, halo rings, wordmark
+	local stage = new("Frame", {
+		Name = "Stage",
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		Position = UDim2.new(0.5, 0, 0.5, -30),
+		Size = UDim2.fromOffset(320, 220),
+		BackgroundTransparency = 1,
+		BorderSizePixel = 0,
+	}, overlay)
+	local stageScale = new("UIScale", { Scale = 1 }, stage)
+
+	local function haloRing(delay)
+		local f = frame({
+			AnchorPoint = Vector2.new(0.5, 0.5),
+			Position = UDim2.new(0.5, 0, 0, 70),
+			Size = UDim2.fromOffset(92, 92),
+			BackgroundTransparency = 1,
+		}, stage)
+		corner(f, 999)
+		local st = stroke(f, 1, C.white, 2)
+		Theme.bind(function(v)
+			st.Color = v.accent
+		end)
+		local sc = new("UIScale", { Scale = 1 }, f)
+		task.spawn(function()
+			task.wait(delay)
+			while alive do
+				sc.Scale = 1
+				st.Transparency = 0.6
+				tween(sc, 2.4, { Scale = 2.2 }, Enum.EasingStyle.Quad)
+				local tw = tween(st, 2.4, { Transparency = 1 }, Enum.EasingStyle.Quad)
+				tw.Completed:Wait()
+			end
+			f:Destroy()
+		end)
+	end
+
+	local logo, logoScale = buildLogo(92, stage)
+	logo.Position = UDim2.new(0.5, 0, 0, 70)
+	logo.GroupTransparency = 1
+	logoScale.Scale = 0.6
+
+	local word = string.upper(CONFIG.Name)
+	local TRACK = 8
+	local widths, total = {}, 0
+	for i = 1, #word do
+		widths[i] = textWidth(word:sub(i, i), 17, Enum.Font.GothamSemibold)
+		total += widths[i]
+	end
+	total += TRACK * (#word - 1)
+	local letters, xs = {}, {}
+	do
+		local cx = -total / 2
+		for i = 1, #word do
+			xs[i] = cx
+			letters[i] = label({
+				Text = word:sub(i, i),
+				AnchorPoint = Vector2.new(0, 0.5),
+				Position = UDim2.new(0.5, cx, 0, 160),
+				Size = UDim2.fromOffset(widths[i] + 2, 22),
+				Font = Enum.Font.GothamSemibold,
+				TextSize = 17,
+				TextTransparency = 1,
+			}, stage)
+			cx += widths[i] + TRACK
+		end
+	end
+
+	-- ---------- progress
+	local progress = new("CanvasGroup", {
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		Position = UDim2.new(0.5, 0, 0.5, 112),
+		Size = UDim2.fromOffset(240, 44),
+		BackgroundTransparency = 1,
+		GroupTransparency = 1,
+		BorderSizePixel = 0,
+	}, overlay)
+	local track = frame({
+		Position = UDim2.fromOffset(0, 6),
+		Size = UDim2.fromOffset(240, 4),
+		BackgroundColor3 = C.white,
+		BackgroundTransparency = 0.88,
+	}, progress)
+	corner(track, 2)
+	local fill = frame({ Size = UDim2.fromScale(0, 1), BackgroundColor3 = C.white }, track)
+	corner(fill, 2)
+	new("UIGradient", { Color = ColorSequence.new(C.white, rgb(185, 188, 196)) }, fill)
+	Theme.bind(function(v, instant)
+		setProps(fill, instant and 0 or 0.3, { BackgroundColor3 = v.accent })
+	end)
+	local status = label({
+		Position = UDim2.fromOffset(0, 18),
+		Size = UDim2.fromOffset(170, 16),
+		TextColor3 = C.sub,
+		TextSize = 12,
+		TextTransparency = 1,
+	}, progress)
+	local pct = label({
+		Text = "0%",
+		AnchorPoint = Vector2.new(1, 0),
+		Position = UDim2.new(1, 0, 0, 18),
+		Size = UDim2.fromOffset(60, 16),
+		TextXAlignment = Enum.TextXAlignment.Right,
+		TextColor3 = C.sub,
+		TextSize = 12,
+	}, progress)
+	local pv = Instance.new("NumberValue")
+	pv.Changed:Connect(function()
+		pct.Text = math.floor(pv.Value * 100 + 0.5) .. "%"
+	end)
+
+	local function fadeSwap(textLabel, text)
+		tween(textLabel, 0.12, { TextTransparency = 1 })
+		task.wait(0.13)
+		textLabel.Text = text
+		tween(textLabel, 0.2, { TextTransparency = 0 })
+	end
+
+	-- ---------- prompt card
+	local prompt = glassCard(430, 200, 62, "bar")
+	label({
+		Text = "Are you here to use " .. CONFIG.Name .. " today?",
+		Position = UDim2.new(0.5, -195, 0, 26),
+		Size = UDim2.fromOffset(390, 56),
+		TextXAlignment = Enum.TextXAlignment.Center,
+		TextWrapped = true,
+		Font = Enum.Font.GothamSemibold,
+		TextSize = 22,
+	}, prompt.Card)
+	label({
+		Text = "Choose one to continue.",
+		Position = UDim2.new(0.5, -195, 0, 86),
+		Size = UDim2.fromOffset(390, 18),
+		TextXAlignment = Enum.TextXAlignment.Center,
+		TextColor3 = C.sub,
+		TextSize = 13,
+	}, prompt.Card)
+	local btnRow = frame({
+		AnchorPoint = Vector2.new(0.5, 0),
+		Position = UDim2.new(0.5, 0, 0, 126),
+		Size = UDim2.fromOffset(346, 46),
+		BackgroundTransparency = 1,
+	}, prompt.Card)
+	local yes = makeButton(btnRow, "Yes", "primary", 170, 46, { Position = UDim2.fromOffset(0, 0) })
+	local no = makeButton(btnRow, "No", "ghost", 170, 46, { Position = UDim2.fromOffset(176, 0) })
+
+	-- ---------- profile card
+	local profileCard = glassCard(320, 308, 20, "panel")
+	local pc = profileCard.Card
+	label({
+		Text = "Profile",
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		Position = UDim2.new(0.5, 0, 0, 30),
+		Size = UDim2.fromOffset(200, 22),
+		TextXAlignment = Enum.TextXAlignment.Center,
+		Font = Enum.Font.GothamSemibold,
+		TextSize = 16,
+	}, pc)
+	local avatar = frame({
+		AnchorPoint = Vector2.new(0.5, 0),
+		Position = UDim2.new(0.5, 0, 0, 58),
+		Size = UDim2.fromOffset(108, 108),
+		BackgroundColor3 = rgb(36, 37, 40),
+	}, pc)
+	corner(avatar, 54)
+	local avatarImg = new("ImageLabel", {
+		BackgroundTransparency = 1,
+		BorderSizePixel = 0,
+		Size = UDim2.fromScale(1, 1),
+		Image = "",
+		ImageTransparency = 1,
+	}, avatar)
+	corner(avatarImg, 54)
+	local shimmer = frame({ Size = UDim2.fromScale(1, 1), BackgroundColor3 = C.white }, avatar)
+	corner(shimmer, 54)
+	local shimmerGrad = new("UIGradient", {
+		Transparency = NumberSequence.new({
+			NumberSequenceKeypoint.new(0, 1),
+			NumberSequenceKeypoint.new(0.5, 0.78),
+			NumberSequenceKeypoint.new(1, 1),
+		}),
+		Offset = Vector2.new(-1, 0),
+	}, shimmer)
+	local nameL = label({
+		Text = LocalPlayer.DisplayName,
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		Position = UDim2.new(0.5, 0, 0, 192),
+		Size = UDim2.fromOffset(280, 24),
+		TextXAlignment = Enum.TextXAlignment.Center,
+		Font = Enum.Font.GothamBold,
+		TextSize = 19,
+		TextTransparency = 1,
+	}, pc)
+	local handleL = label({
+		Text = "@" .. LocalPlayer.Name,
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		Position = UDim2.new(0.5, 0, 0, 216),
+		Size = UDim2.fromOffset(280, 18),
+		TextXAlignment = Enum.TextXAlignment.Center,
+		TextColor3 = rgb(170, 173, 180),
+		TextSize = 13,
+		TextTransparency = 1,
+	}, pc)
+	local chips = new("CanvasGroup", {
+		AnchorPoint = Vector2.new(0.5, 0),
+		Position = UDim2.new(0.5, 0, 0, 248),
+		Size = UDim2.fromOffset(300, 28),
+		BackgroundTransparency = 1,
+		GroupTransparency = 1,
+		BorderSizePixel = 0,
+	}, pc)
+	new("UIListLayout", {
+		FillDirection = Enum.FillDirection.Horizontal,
+		HorizontalAlignment = Enum.HorizontalAlignment.Center,
+		VerticalAlignment = Enum.VerticalAlignment.Center,
+		Padding = UDim.new(0, 8),
+	}, chips)
+	local function chip(text)
+		local f = frame({
+			Size = UDim2.fromOffset(textWidth(text, 12) + 24, 26),
+			BackgroundColor3 = C.black,
+			BackgroundTransparency = 0.6,
+		}, chips)
+		corner(f, 13)
+		stroke(f, 0.9)
+		label({
+			Text = text,
+			Size = UDim2.fromScale(1, 1),
+			TextXAlignment = Enum.TextXAlignment.Center,
+			TextSize = 12,
+		}, f)
+	end
+	chip(LocalPlayer.AccountAge .. " days on Roblox")
+	chip(LocalPlayer.MembershipType == Enum.MembershipType.Premium and "Premium" or "Standard")
+
+	-- =============== timeline ===============
+	task.wait(0.7)
+	tween(logo, 0.8, { GroupTransparency = 0 })
+	tween(logoScale, 1, { Scale = 1 }, Enum.EasingStyle.Back)
+	haloRing(0.2)
+	haloRing(1.4)
+	task.spawn(function()
+		task.wait(1)
+		while alive do
+			local tw = tween(logoScale, 1.5, { Scale = 1.045 }, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut)
+			tw.Completed:Wait()
+			local tw2 = tween(logoScale, 1.5, { Scale = 1 }, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut)
+			tw2.Completed:Wait()
+		end
+	end)
+	task.wait(0.4)
+	for i, l in ipairs(letters) do
+		task.delay(0.06 * i, function()
+			l.Position = UDim2.new(0.5, xs[i], 0, 170)
+			tween(l, 0.6, { TextTransparency = 0, Position = UDim2.new(0.5, xs[i], 0, 160) })
+		end)
+	end
+	task.wait(0.9)
+	tween(progress, 0.5, { GroupTransparency = 0 })
+	local steps = {
+		{ "Starting up", 0.14 },
+		{ "Loading modules", 0.38 },
+		{ "Building interface", 0.66 },
+		{ "Syncing your profile", 0.88 },
+		{ "Ready", 1 },
+	}
+	for _, st in ipairs(steps) do
+		task.spawn(fadeSwap, status, st[1])
+		tween(fill, 0.6, { Size = UDim2.fromScale(st[2], 1) })
+		tween(pv, 0.6, { Value = st[2] })
+		task.wait(0.5 + math.random() * 0.3)
+	end
+	task.wait(0.3)
+	tween(progress, 0.35, { GroupTransparency = 1 })
+	tween(stage, 0.7, { Position = UDim2.new(0.5, 0, 0.5, -170) })
+	tween(stageScale, 0.7, { Scale = 0.78 })
+	task.wait(0.45)
+
+	prompt.Show()
+	local answered = Instance.new("BindableEvent")
+	yes.Button.MouseButton1Click:Connect(function()
+		answered:Fire(true)
+	end)
+	no.Button.MouseButton1Click:Connect(function()
+		answered:Fire(false)
+	end)
+	local ans = answered.Event:Wait()
+	answered:Destroy()
+	prompt.Hide()
+
+	if not ans then
+		task.wait(0.4)
+		local bye = label({
+			Text = "See you next time.",
+			AnchorPoint = Vector2.new(0.5, 0.5),
+			Position = UDim2.new(0.5, 0, 0.5, 40),
+			Size = UDim2.fromOffset(400, 30),
+			TextXAlignment = Enum.TextXAlignment.Center,
+			Font = Enum.Font.GothamSemibold,
+			TextSize = 20,
+			TextTransparency = 1,
+		}, overlay)
+		tween(bye, 0.45, { TextTransparency = 0 })
+		task.wait(1.3)
+		alive = false
+		tween(bye, 0.3, { TextTransparency = 1 })
+		tween(logo, 0.4, { GroupTransparency = 1 })
+		for _, l in ipairs(letters) do
+			tween(l, 0.4, { TextTransparency = 1 })
+		end
+		tween(overlay, 0.7, { BackgroundTransparency = 1 })
+		tween(blur, 0.7, { Size = 0 })
+		task.wait(0.8)
+		overlay:Destroy()
+		Unload()
+		return
+	end
+
+	-- profile
+	alive = false
+	tween(logo, 0.45, { GroupTransparency = 1 })
+	for _, l in ipairs(letters) do
+		tween(l, 0.4, { TextTransparency = 1 })
+	end
+	task.wait(0.4)
+	profileCard.Show()
+
+	local shimmerOn = true
+	task.spawn(function()
+		while shimmerOn do
+			shimmerGrad.Offset = Vector2.new(-1, 0)
+			local tw = tween(shimmerGrad, 1.1, { Offset = Vector2.new(1, 0) }, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut)
+			tw.Completed:Wait()
+		end
+	end)
+	local thumbUrl, thumbDone = nil, false
+	task.spawn(function()
+		local ok, url = pcall(function()
+			return (Players:GetUserThumbnailAsync(LocalPlayer.UserId, Enum.ThumbnailType.AvatarBust, Enum.ThumbnailSize.Size420x420))
+		end)
+		if ok then
+			thumbUrl = url
+		end
+		thumbDone = true
+	end)
+	local t0 = os.clock()
+	while (not thumbDone and os.clock() - t0 < 5) or os.clock() - t0 < 1.5 do
+		task.wait(0.05)
+	end
+	if thumbUrl then
+		avatarImg.Image = thumbUrl
+		tween(avatarImg, 0.5, { ImageTransparency = 0 })
+	end
+	shimmerOn = false
+	tween(shimmer, 0.4, { BackgroundTransparency = 1 })
+	tween(nameL, 0.45, { TextTransparency = 0 })
+	task.wait(0.15)
+	tween(handleL, 0.45, { TextTransparency = 0 })
+	task.wait(0.15)
+	tween(chips, 0.45, { GroupTransparency = 0 })
+	task.wait(1.5)
+
+	-- into the bar
+	profileCard.Hide()
+	task.wait(0.35)
+	state.ready = true
+	setShown(true)
+	tween(overlay, 0.9, { BackgroundTransparency = 1 })
+	tween(blur, 1, { Size = 0 })
+	task.wait(1)
+	overlay:Destroy()
+	if state.configLoaded then
+		toast("Config loaded", "Your saved settings were applied.")
+	end
+end
+
+--========================================================================
+-- INPUT + API + BOOT
+--========================================================================
+bindConn(UserInputService.InputBegan, function(input)
+	if input.KeyCode ~= CONFIG.ToggleKey then
+		return
+	end
+	if not state.ready or state.listening then
+		return
+	end
+	if UserInputService:GetFocusedTextBox() then
+		return
+	end
+	setShown(not state.shown)
+end)
+
+local API = {
+	Tabs = Tabs,
+	Components = COMP,
+	Theme = Theme,
+	Config = CONFIG,
+	Cfg = Cfg,
+	Perf = Perf,
+	Env = Env,
+	Gui = gui,
+	Toast = toast,
+}
+function API.Show()
+	setShown(true)
+end
+function API.Hide()
+	setShown(false)
+end
+function API.Toggle()
+	setShown(not state.shown)
+end
+function API.Minimize(v)
+	if v == nil then
+		v = not state.minimized
+	end
+	setMinimized(v)
+end
+function API.Select(id)
+	for _, t in ipairs(TABS) do
+		if t.id == id then
+			if state.minimized then
+				setMinimized(false)
+			end
+			setActive(t)
+			return
+		end
+	end
+end
+function API.Unload()
+	Unload()
+end
+
+Unload = function()
+	if unloaded then
+		return
+	end
+	unloaded = true
+	state.ready = false
+	for i = #cleanups, 1, -1 do
+		pcall(cleanups[i])
+	end
+	pcall(function()
+		if getgenv and getgenv().Kevinware == API then
+			getgenv().Kevinware = nil
+		end
+	end)
+end
+
+pcall(function()
+	getgenv().Kevinware = API
+end)
+
+-- auto config: load the saved config if the user turned it on
+do
+	local data = Cfg.loadFile()
+	if data and data.auto then
+		Cfg.apply(data)
+		Cfg.auto = true
+		if autoToggle then
+			autoToggle.Set(true, true)
+		end
+		state.configLoaded = true
+	end
+end
+
+setUiScale(uiScaleValue)
+if CONFIG.ShowLoader then
+	task.spawn(runLoader)
+else
+	state.ready = true
+	setShown(true)
+end
+
+return API
