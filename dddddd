@@ -1628,11 +1628,12 @@ local function newRow(g, height)
 	return r
 end
 
-local function rowLabel(r, text, desc, widthScale)
+-- fixedH: pin the title to a fixed header height (rows that expand or have stacked controls)
+local function rowLabel(r, text, desc, widthScale, fixedH)
 	local ws = widthScale or 0.55
 	local title = label({
 		Text = text,
-		Position = desc and UDim2.fromOffset(16, 11) or UDim2.new(0, 16, 0.5, -9),
+		Position = desc and UDim2.fromOffset(16, 11) or (fixedH and UDim2.fromOffset(16, (fixedH - 18) / 2)) or UDim2.new(0, 16, 0.5, -9),
 		Size = UDim2.new(ws, 0, 0, 18),
 		TextTruncate = Enum.TextTruncate.AtEnd,
 	}, r)
@@ -1740,7 +1741,7 @@ end
 function COMP.Slider(g, o)
 	local min, max, step = o.min, o.max, o.step or 1
 	local r = newRow(g, 64)
-	rowLabel(r, o.text, nil, 0.6)
+	rowLabel(r, o.text, nil, 0.6, 38)
 	local valueLabel = label({
 		AnchorPoint = Vector2.new(1, 0),
 		Position = UDim2.new(1, -16, 0, 10),
@@ -1850,7 +1851,7 @@ function COMP.Dropdown(g, o)
 		Size = UDim2.new(1, 0, 0, 52),
 		ZIndex = 1,
 	}, r)
-	rowLabel(r, o.text, nil, 0.4)
+	rowLabel(r, o.text, nil, 0.4, 52)
 
 	local pill = frame({
 		AnchorPoint = Vector2.new(1, 0.5),
@@ -1958,7 +1959,7 @@ function COMP.Segmented(g, o)
 	local opts = o.options
 	local n = #opts
 	local r = newRow(g, 84)
-	rowLabel(r, o.text, nil, 0.6)
+	rowLabel(r, o.text, nil, 0.6, 40)
 
 	local selected = o.default
 	if selected == nil then
@@ -2053,10 +2054,10 @@ end
 -- --------------------------------------------------------------- swatches
 function COMP.Swatches(g, o)
 	local r = newRow(g, 94)
-	rowLabel(r, o.text, nil, 0.5)
+	rowLabel(r, o.text, nil, 0.5, 40)
 	local nameLabel = label({
 		AnchorPoint = Vector2.new(1, 0),
-		Position = UDim2.new(1, -16, 0, 17),
+		Position = UDim2.new(1, -16, 0, 11),
 		Size = UDim2.fromOffset(120, 18),
 		TextXAlignment = Enum.TextXAlignment.Right,
 		TextColor3 = C.sub,
@@ -2151,7 +2152,7 @@ function COMP.ColorPicker(g, o)
 		Size = UDim2.new(1, 0, 0, 52),
 		ZIndex = 1,
 	}, r)
-	rowLabel(r, o.text, nil, 0.6)
+	rowLabel(r, o.text, nil, 0.6, 52)
 
 	local h, s, v = (o.default or C.white):ToHSV()
 	local swatch = frame({
@@ -2326,7 +2327,7 @@ end
 -- ------------------------------------------------------------- text input
 function COMP.Input(g, o)
 	local r = newRow(g, 94)
-	rowLabel(r, o.text, o.desc, 0.9)
+	rowLabel(r, o.text, o.desc, 0.9, 40)
 	local barF = frame({
 		Position = UDim2.fromOffset(16, 48),
 		Size = UDim2.new(1, -(32 + 96), 0, 34),
@@ -5924,6 +5925,7 @@ local Access = {
 	expires = nil,
 	err = nil,
 	listeners = {},
+	gated = {}, -- group wrappers that only approved users can see
 	ownerKey = Cfg.readText("ownerkey") or "",
 }
 
@@ -6090,7 +6092,7 @@ do
 
 	local gOpen = COMP.Group(page, "Aim")
 	local openRow = newRow(gOpen, 56)
-	rowLabel(openRow, "Access", "Aim features will appear here", 0.6)
+	rowLabel(openRow, "Access", "Aim settings are below", 0.6)
 	local openL = label({
 		AnchorPoint = Vector2.new(1, 0.5),
 		Position = UDim2.new(1, -16, 0.5, 0),
@@ -6104,6 +6106,9 @@ do
 		local has = Access.has()
 		gLock.box.Parent.Visible = not has
 		gOpen.box.Parent.Visible = has
+		for _, f in ipairs(Access.gated) do
+			f.Visible = has
+		end
 		local st = Access.status
 		local text = ({
 			checking = "Checking...",
@@ -6438,6 +6443,1018 @@ if IS_OWNER then
 		task.wait(1)
 		ownerRefresh()
 	end)
+end
+
+--========================================================================
+-- AIM  (camlock, silent aim, FOV, team check, triggerbot)
+-- Only runs for approved users (Access.has()).
+--========================================================================
+local Aim = {
+	s = {
+		camlock = false,
+		silent = false,
+		trigger = false,
+		teamCheck = true,
+		wallCheck = false,
+		part = "Head",
+		key = "Right Mouse",
+		smooth = 5,
+		fov = 150,
+		showFov = true,
+		fovColor = rgb(255, 255, 255),
+		prediction = 0,
+		hitChance = 100,
+		triggerDelay = 60,
+		triggerHold = false,
+	},
+	locked = nil,
+	silentPart = nil,
+	silentPos = nil,
+	trigBusy = false,
+}
+
+do
+	local s = Aim.s
+	local VIM = game:GetService("VirtualInputManager")
+
+	local fovLayer = new("Frame", {
+		Name = "AimFov",
+		BackgroundTransparency = 1,
+		BorderSizePixel = 0,
+		Size = UDim2.fromScale(1, 1),
+		ZIndex = 0,
+		Visible = false,
+	}, gui)
+	local fovCircle = frame({
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		BackgroundTransparency = 1,
+		Size = UDim2.fromOffset(300, 300),
+	}, fovLayer)
+	corner(fovCircle, 9999)
+	local fovStroke = stroke(fovCircle, 0.3, C.white, 1.5)
+
+	local rayParams = RaycastParams.new()
+	rayParams.FilterType = Enum.RaycastFilterType.Exclude
+
+	local function isEnemy(plr)
+		if plr == LocalPlayer then
+			return false
+		end
+		if s.teamCheck and plr.Team ~= nil and plr.Team == LocalPlayer.Team then
+			return false
+		end
+		return true
+	end
+
+	local function isAlive(char)
+		local hum = char and char:FindFirstChildOfClass("Humanoid")
+		return hum ~= nil and hum.Health > 0 and char:FindFirstChildOfClass("ForceField") == nil
+	end
+
+	local function aimPart(char, cam, mouse)
+		local p = s.part
+		if p == "Head" then
+			return char:FindFirstChild("Head")
+		elseif p == "Torso" then
+			return char:FindFirstChild("UpperTorso") or char:FindFirstChild("Torso")
+		elseif p == "Root" then
+			return char:FindFirstChild("HumanoidRootPart")
+		end
+		-- "Closest": whichever of head / torso / root is nearest the cursor
+		local best, bestD
+		for _, n in ipairs({ "Head", "UpperTorso", "Torso", "HumanoidRootPart" }) do
+			local part = char:FindFirstChild(n)
+			if part then
+				local sp = cam:WorldToViewportPoint(part.Position)
+				local d = (Vector2.new(sp.X, sp.Y) - mouse).Magnitude
+				if not bestD or d < bestD then
+					best, bestD = part, d
+				end
+			end
+		end
+		return best
+	end
+
+	local function lineOfSight(cam, part, char)
+		local filter = { char }
+		if LocalPlayer.Character then
+			filter[2] = LocalPlayer.Character
+		end
+		rayParams.FilterDescendantsInstances = filter
+		local o = cam.CFrame.Position
+		return Workspace:Raycast(o, part.Position - o, rayParams) == nil
+	end
+
+	local function findTarget(cam)
+		local mouse = UserInputService:GetMouseLocation()
+		local best, bestD = nil, s.fov
+		for _, plr in ipairs(Players:GetPlayers()) do
+			local char = plr.Character
+			if isEnemy(plr) and isAlive(char) then
+				local part = aimPart(char, cam, mouse)
+				if part then
+					local sp = cam:WorldToViewportPoint(part.Position)
+					if sp.Z > 0 then
+						local d = (Vector2.new(sp.X, sp.Y) - mouse).Magnitude
+						if d < bestD and (not s.wallCheck or lineOfSight(cam, part, char)) then
+							best, bestD = part, d
+						end
+					end
+				end
+			end
+		end
+		return best
+	end
+
+	local function predicted(part)
+		return part.Position + part.AssemblyLinearVelocity * s.prediction
+	end
+
+	local MOUSE = {
+		["Right Mouse"] = Enum.UserInputType.MouseButton2,
+		["Left Mouse"] = Enum.UserInputType.MouseButton1,
+		["Middle Mouse"] = Enum.UserInputType.MouseButton3,
+	}
+	local function keyHeld()
+		local k = s.key
+		if k == "Always on" then
+			return true
+		end
+		if MOUSE[k] then
+			return UserInputService:IsMouseButtonPressed(MOUSE[k])
+		end
+		local kc = Enum.KeyCode[(k:gsub(" ", ""))]
+		return kc ~= nil and UserInputService:IsKeyDown(kc)
+	end
+
+	-- ---- silent aim: redirects Mouse.Hit / Mouse.Target and Raycast / FindPartOnRay calls
+	local hooked = false
+	function Aim.installHooks()
+		if hooked then
+			return true
+		end
+		if type(hookmetamethod) ~= "function" or type(getnamecallmethod) ~= "function" then
+			return false
+		end
+		local wrap = type(newcclosure) == "function" and newcclosure or function(f)
+			return f
+		end
+		local fromScript = type(checkcaller) == "function" and checkcaller or function()
+			return false
+		end
+		local mouse = LocalPlayer:GetMouse()
+		local oldIndex, oldNamecall
+		local ok = pcall(function()
+			oldIndex = hookmetamethod(
+				game,
+				"__index",
+				wrap(function(self, key)
+					if Aim.silentPart and self == mouse and (key == "Hit" or key == "Target") and not fromScript() then
+						if math.random(100) <= s.hitChance then
+							if key == "Hit" then
+								return CFrame.new(Aim.silentPos)
+							end
+							return Aim.silentPart
+						end
+					end
+					return oldIndex(self, key)
+				end)
+			)
+			oldNamecall = hookmetamethod(
+				game,
+				"__namecall",
+				wrap(function(self, ...)
+					if Aim.silentPart and self == Workspace and not fromScript() then
+						local method = getnamecallmethod()
+						local n = select("#", ...)
+						local a = { ... }
+						if method == "Raycast" then
+							if typeof(a[1]) == "Vector3" and typeof(a[2]) == "Vector3" and math.random(100) <= s.hitChance then
+								a[2] = (Aim.silentPos - a[1]).Unit * a[2].Magnitude
+								return oldNamecall(self, table.unpack(a, 1, n))
+							end
+						elseif
+							method == "FindPartOnRay"
+							or method == "FindPartOnRayWithIgnoreList"
+							or method == "FindPartOnRayWithWhitelist"
+						then
+							local ray = a[1]
+							if typeof(ray) == "Ray" and math.random(100) <= s.hitChance then
+								a[1] = Ray.new(ray.Origin, (Aim.silentPos - ray.Origin).Unit * ray.Direction.Magnitude)
+								return oldNamecall(self, table.unpack(a, 1, n))
+							end
+						end
+					end
+					return oldNamecall(self, ...)
+				end)
+			)
+		end)
+		hooked = ok
+		return ok
+	end
+
+	local function click()
+		pcall(function()
+			if type(mouse1click) == "function" then
+				mouse1click()
+			else
+				local p = UserInputService:GetMouseLocation()
+				VIM:SendMouseButtonEvent(p.X, p.Y, 0, true, game, 1)
+				task.wait(0.02)
+				VIM:SendMouseButtonEvent(p.X, p.Y, 0, false, game, 1)
+			end
+		end)
+	end
+
+	local function step(dt)
+		local allowed = Access.has()
+		local anyOn = s.camlock or s.silent or s.trigger
+		local circle = allowed and s.showFov and anyOn
+		fovLayer.Visible = circle
+		if circle then
+			local m = UserInputService:GetMouseLocation()
+			fovCircle.Position = UDim2.fromOffset(m.X, m.Y)
+			fovCircle.Size = UDim2.fromOffset(s.fov * 2, s.fov * 2)
+			fovStroke.Color = s.fovColor
+		end
+		local cam = Workspace.CurrentCamera
+		if not (allowed and anyOn and cam) then
+			Aim.locked, Aim.silentPart = nil, nil
+			return
+		end
+
+		if s.silent then
+			local part = findTarget(cam)
+			Aim.silentPart = part
+			Aim.silentPos = part and predicted(part) or nil
+		else
+			Aim.silentPart = nil
+		end
+
+		if s.camlock and keyHeld() then
+			local t = Aim.locked
+			if not (t and t.Parent and isAlive(t.Parent)) then
+				t = findTarget(cam)
+				Aim.locked = t
+			end
+			if t then
+				local goal = CFrame.lookAt(cam.CFrame.Position, predicted(t))
+				local alpha = s.smooth <= 1 and 1 or (1 - (1 - 1 / s.smooth) ^ (dt * 60))
+				cam.CFrame = cam.CFrame:Lerp(goal, alpha)
+			end
+		else
+			Aim.locked = nil
+		end
+
+		if s.trigger and not Aim.trigBusy and (not s.triggerHold or keyHeld()) then
+			local m = UserInputService:GetMouseLocation()
+			local ray = cam:ViewportPointToRay(m.X, m.Y)
+			rayParams.FilterDescendantsInstances = LocalPlayer.Character and { LocalPlayer.Character } or {}
+			local hit = Workspace:Raycast(ray.Origin, ray.Direction * 1000, rayParams)
+			local inst = hit and hit.Instance
+			local char = inst and inst:FindFirstAncestorOfClass("Model")
+			local plr = char and Players:GetPlayerFromCharacter(char)
+			if plr and isEnemy(plr) and isAlive(char) then
+				Aim.trigBusy = true
+				task.delay(s.triggerDelay / 1000, function()
+					click()
+					task.wait(0.08)
+					Aim.trigBusy = false
+				end)
+			end
+		end
+	end
+
+	-- after the camera script, so our camera change is the one that gets drawn
+	RunService:BindToRenderStep("KevinwareAim", Enum.RenderPriority.Camera.Value + 1, function(dt)
+		pcall(step, dt)
+	end)
+	onUnload(function()
+		pcall(function()
+			RunService:UnbindFromRenderStep("KevinwareAim")
+		end)
+		Aim.silentPart = nil
+		fovLayer.Visible = false
+	end)
+end
+
+do
+	local page = Tabs.Aim.Content
+	local s = Aim.s
+	local function gated(g)
+		table.insert(Access.gated, g.box.Parent)
+		g.box.Parent.Visible = Access.has()
+		return g
+	end
+	local KEYS = { "Right Mouse", "Left Mouse", "Middle Mouse", "E", "Q", "Left Shift", "Left Alt", "Always on" }
+
+	local gCam = gated(COMP.Group(page, "Camlock"))
+	COMP.Toggle(gCam, {
+		key = "aim.camlock",
+		text = "Camlock",
+		desc = "Pulls your camera onto the closest target inside the FOV",
+		default = false,
+		callback = function(on)
+			s.camlock = on
+		end,
+	})
+	COMP.Dropdown(gCam, {
+		key = "aim.key",
+		text = "Aim key",
+		options = KEYS,
+		default = s.key,
+		callback = function(v)
+			s.key = v
+		end,
+	})
+	COMP.Dropdown(gCam, {
+		key = "aim.part",
+		text = "Aim part",
+		options = { "Head", "Torso", "Root", "Closest" },
+		default = s.part,
+		callback = function(v)
+			s.part = v
+		end,
+	})
+	COMP.Slider(gCam, {
+		key = "aim.smooth",
+		text = "Smoothness",
+		min = 1,
+		max = 20,
+		step = 1,
+		default = s.smooth,
+		format = function(v)
+			return v <= 1 and "Instant" or tostring(math.floor(v + 0.5))
+		end,
+		callback = function(v)
+			s.smooth = v
+		end,
+	})
+	COMP.Slider(gCam, {
+		key = "aim.prediction",
+		text = "Prediction",
+		min = 0,
+		max = 0.3,
+		step = 0.01,
+		default = s.prediction,
+		callback = function(v)
+			s.prediction = v
+		end,
+	})
+
+	local gSil = gated(COMP.Group(page, "Silent aim"))
+	COMP.Toggle(gSil, {
+		key = "aim.silent",
+		text = "Silent aim",
+		desc = "Redirects your shots without moving the camera",
+		default = false,
+		callback = function(on)
+			s.silent = on
+			if on and not Aim.installHooks() then
+				toast("Silent aim unavailable", "Your executor has no hookmetamethod.", 4)
+			end
+		end,
+	})
+	COMP.Slider(gSil, {
+		key = "aim.hitchance",
+		text = "Hit chance",
+		min = 1,
+		max = 100,
+		step = 1,
+		default = s.hitChance,
+		suffix = "%",
+		callback = function(v)
+			s.hitChance = v
+		end,
+	})
+
+	local gTgt = gated(COMP.Group(page, "Targeting"))
+	COMP.Toggle(gTgt, {
+		key = "aim.team",
+		text = "Team check",
+		desc = "Ignore players on your team",
+		default = s.teamCheck,
+		callback = function(on)
+			s.teamCheck = on
+		end,
+	})
+	COMP.Toggle(gTgt, {
+		key = "aim.wall",
+		text = "Wall check",
+		desc = "Ignore players you can't see",
+		default = s.wallCheck,
+		callback = function(on)
+			s.wallCheck = on
+		end,
+	})
+	COMP.Slider(gTgt, {
+		key = "aim.fov",
+		text = "FOV",
+		min = 20,
+		max = 600,
+		step = 5,
+		default = s.fov,
+		suffix = " px",
+		callback = function(v)
+			s.fov = v
+		end,
+	})
+	COMP.Toggle(gTgt, {
+		key = "aim.showfov",
+		text = "Show FOV circle",
+		default = s.showFov,
+		callback = function(on)
+			s.showFov = on
+		end,
+	})
+	COMP.ColorPicker(gTgt, {
+		key = "aim.fovcolor",
+		text = "FOV color",
+		default = s.fovColor,
+		callback = function(c)
+			s.fovColor = c
+		end,
+	})
+
+	local gTrig = gated(COMP.Group(page, "Triggerbot"))
+	COMP.Toggle(gTrig, {
+		key = "aim.trigger",
+		text = "Triggerbot",
+		desc = "Clicks when your crosshair is on an enemy",
+		default = false,
+		callback = function(on)
+			s.trigger = on
+		end,
+	})
+	COMP.Slider(gTrig, {
+		key = "aim.triggerdelay",
+		text = "Delay",
+		min = 0,
+		max = 500,
+		step = 10,
+		default = s.triggerDelay,
+		suffix = " ms",
+		callback = function(v)
+			s.triggerDelay = v
+		end,
+	})
+	COMP.Toggle(gTrig, {
+		key = "aim.triggerhold",
+		text = "Only while aim key held",
+		default = s.triggerHold,
+		callback = function(on)
+			s.triggerHold = on
+		end,
+	})
+end
+Access.fire()
+
+--========================================================================
+-- CUSTOM MACROS  (record key presses, edit delay / hold, speed, repeats, hotkey)
+--========================================================================
+local Macros = { list = {}, sel = nil, recording = nil, playing = {}, open = {}, recLast = nil }
+
+do
+	local HttpService = game:GetService("HttpService")
+	local VIM = game:GetService("VirtualInputManager")
+	local page = Tabs.Macros.Content
+	local editorOpen = false
+
+	local function typing()
+		return UserInputService:GetFocusedTextBox() ~= nil
+	end
+	local function pretty(ev)
+		if ev.kind == "mouse" then
+			return ({ MouseButton1 = "Left click", MouseButton2 = "Right click", MouseButton3 = "Middle click" })[ev.k]
+				or tostring(ev.k)
+		end
+		return (tostring(ev.k):gsub("(%l)(%u)", "%1 %2"))
+	end
+	local function press(ev, down)
+		pcall(function()
+			if ev.kind == "mouse" then
+				local btn = ev.k == "MouseButton1" and 0 or (ev.k == "MouseButton2" and 1 or 2)
+				local p = UserInputService:GetMouseLocation()
+				VIM:SendMouseButtonEvent(p.X, p.Y, btn, down, game, 1)
+			else
+				local kc = Enum.KeyCode[tostring(ev.k)]
+				if kc then
+					VIM:SendKeyEvent(down, kc, false, game)
+				end
+			end
+		end)
+	end
+
+	local refreshList, refreshEditor, refreshEvents, selectMacro, startRec, stopRec
+
+	-- ---------------------------------------------------------- playback
+	function Macros.stop(m)
+		local t = Macros.playing[m]
+		if t then
+			t.cancel = true
+		end
+	end
+	function Macros.play(m)
+		if Macros.playing[m] or #m.events == 0 then
+			return
+		end
+		local token = { cancel = false }
+		Macros.playing[m] = token
+		task.spawn(function()
+			local n = 0
+			local speed = math.max(tonumber(m.speed) or 1, 0.05)
+			while not token.cancel and (m.loops == 0 or n < m.loops) do
+				n += 1
+				for _, ev in ipairs(m.events) do
+					if token.cancel then
+						break
+					end
+					task.wait(math.max(tonumber(ev.delay) or 0, 0) / 1000 / speed)
+					if token.cancel then
+						break
+					end
+					task.spawn(function()
+						press(ev, true)
+						task.wait(math.max(tonumber(ev.hold) or 50, 10) / 1000 / speed)
+						press(ev, false)
+					end)
+				end
+				local last = m.events[#m.events]
+				if last and not token.cancel then
+					task.wait((math.max(tonumber(last.hold) or 50, 10) / 1000 / speed) + 0.02)
+				end
+				if not token.cancel and (tonumber(m.gap) or 0) > 0 then
+					task.wait(m.gap / 1000)
+				end
+			end
+			Macros.playing[m] = nil
+			refreshList()
+			refreshEditor()
+		end)
+		refreshList()
+		refreshEditor()
+	end
+	onUnload(function()
+		Macros.recording = nil
+		for _, t in pairs(Macros.playing) do
+			t.cancel = true
+		end
+	end)
+
+	-- ------------------------------------------------------------- layout
+	local mainWraps = {}
+	for _, c in ipairs(page:GetChildren()) do
+		if c:IsA("Frame") then
+			table.insert(mainWraps, c)
+		end
+	end
+	local gEntry = COMP.Group(page, "Custom macros")
+	table.insert(mainWraps, gEntry.box.Parent)
+	local gBack = COMP.Group(page, nil)
+	local gList = COMP.Group(page, "Your macros")
+	local gEdit = COMP.Group(page, "Macro editor")
+	local gEvents = COMP.Group(page, "Keys")
+	local listWraps = { gBack.box.Parent, gList.box.Parent }
+	local selWraps = { gEdit.box.Parent, gEvents.box.Parent }
+
+	local function layout()
+		for _, w in ipairs(mainWraps) do
+			w.Visible = not editorOpen
+		end
+		for _, w in ipairs(listWraps) do
+			w.Visible = editorOpen
+		end
+		for _, w in ipairs(selWraps) do
+			w.Visible = editorOpen and Macros.sel ~= nil
+		end
+	end
+	local function showEditor(on)
+		editorOpen = on
+		layout()
+		page.CanvasPosition = Vector2.new(0, 0)
+	end
+
+	COMP.Button(gEntry, {
+		text = "Custom macros",
+		desc = "Record your own key sequences",
+		buttonText = "Open",
+		callback = function()
+			showEditor(true)
+		end,
+	})
+	COMP.Button(gBack, {
+		text = "Back",
+		desc = "Return to the other macros",
+		buttonText = "Back",
+		callback = function()
+			showEditor(false)
+		end,
+	})
+
+	-- ------------------------------------------------------------ editor
+	local nameIn = COMP.Input(gEdit, {
+		text = "Name",
+		placeholder = "macro name",
+		buttonText = "Rename",
+		callback = function(t)
+			local m = Macros.sel
+			if m and t ~= "" then
+				m.name = t
+				Cfg.dirty()
+				refreshList()
+			end
+		end,
+	})
+
+	local hkBtn
+	do
+		local r = newRow(gEdit, 60)
+		rowLabel(r, "Hotkey", "Press it to play or stop. Backspace clears", 0.55)
+		hkBtn = makeButton(r, "None", "ghost", 130, 32, {
+			AnchorPoint = Vector2.new(1, 0.5),
+			Position = UDim2.new(1, -16, 0.5, 0),
+		})
+		hkBtn.Button.MouseButton1Click:Connect(function()
+			local m = Macros.sel
+			if not m or state.listening then
+				return
+			end
+			state.listening = true
+			hkBtn.SetText("Press a key...")
+			local conn
+			conn = UserInputService.InputBegan:Connect(function(input)
+				if input.UserInputType ~= Enum.UserInputType.Keyboard then
+					return
+				end
+				conn:Disconnect()
+				task.delay(0.1, function()
+					state.listening = false
+				end)
+				if input.KeyCode == Enum.KeyCode.Backspace then
+					m.hotkey = nil
+				elseif input.KeyCode ~= Enum.KeyCode.Escape then
+					m.hotkey = input.KeyCode.Name
+				end
+				Cfg.dirty()
+				refreshEditor()
+				refreshList()
+			end)
+		end)
+	end
+
+	local recRow = COMP.Button(gEdit, {
+		text = "Record",
+		desc = "Press keys in the game, then press Stop",
+		buttonText = "Record",
+		style = "primary",
+		callback = function()
+			local m = Macros.sel
+			if not m then
+				return
+			end
+			if Macros.recording then
+				stopRec()
+			else
+				startRec(m)
+			end
+		end,
+	})
+	local playRow = COMP.Button(gEdit, {
+		text = "Play",
+		buttonText = "Play",
+		style = "primary",
+		callback = function()
+			local m = Macros.sel
+			if not m then
+				return
+			end
+			if Macros.playing[m] then
+				Macros.stop(m)
+			else
+				Macros.play(m)
+			end
+		end,
+	})
+	local speedS = COMP.Slider(gEdit, {
+		text = "Speed",
+		min = 0.25,
+		max = 4,
+		step = 0.05,
+		default = 1,
+		suffix = "x",
+		callback = function(v)
+			if Macros.sel then
+				Macros.sel.speed = v
+				Cfg.dirty()
+			end
+		end,
+	})
+	local loopsS = COMP.Slider(gEdit, {
+		text = "Repeat",
+		min = 0,
+		max = 50,
+		step = 1,
+		default = 1,
+		format = function(v)
+			return v < 0.5 and "Forever" or (math.floor(v + 0.5) .. "x")
+		end,
+		callback = function(v)
+			if Macros.sel then
+				Macros.sel.loops = v
+				Cfg.dirty()
+			end
+		end,
+	})
+	local gapS = COMP.Slider(gEdit, {
+		text = "Gap between repeats",
+		min = 0,
+		max = 2000,
+		step = 50,
+		default = 0,
+		suffix = " ms",
+		callback = function(v)
+			if Macros.sel then
+				Macros.sel.gap = v
+				Cfg.dirty()
+			end
+		end,
+	})
+
+	function startRec(m)
+		m.events = {}
+		Macros.recording = m
+		Macros.open = {}
+		Macros.recLast = nil
+		recRow.Button.SetText("Stop")
+		recRow.Button.SetStyle("danger")
+		toast("Recording", "Press the keys you want, then click Stop.", 3)
+		refreshEvents()
+	end
+	function stopRec()
+		local m = Macros.recording
+		Macros.recording = nil
+		Macros.open = {}
+		recRow.Button.SetText("Record")
+		recRow.Button.SetStyle("primary")
+		Cfg.dirty()
+		if m then
+			toast("Recorded " .. #m.events .. " keys", "Edit the delays and holds below.")
+		end
+		refreshEvents()
+		refreshList()
+	end
+
+	-- ------------------------------------------------------- key events
+	function refreshEvents()
+		clearGroup(gEvents)
+		local m = Macros.sel
+		if not m then
+			return
+		end
+		local head = newRow(gEvents, 56)
+		rowLabel(head, #m.events .. " keys", "Delay = wait before the key, Hold = how long it stays down", 0.8)
+		local clr = makeButton(head, "Clear", "ghost", 76, 30, {
+			AnchorPoint = Vector2.new(1, 0.5),
+			Position = UDim2.new(1, -16, 0.5, 0),
+		})
+		clr.Button.MouseButton1Click:Connect(function()
+			m.events = {}
+			Cfg.dirty()
+			refreshEvents()
+			refreshList()
+		end)
+		for i, ev in ipairs(m.events) do
+			if i > 150 then
+				break
+			end
+			local r = newRow(gEvents, 64)
+			label({
+				Text = i .. ".  " .. pretty(ev),
+				Position = UDim2.fromOffset(16, 0),
+				Size = UDim2.fromOffset(140, 64),
+				Font = Enum.Font.GothamSemibold,
+				TextTruncate = Enum.TextTruncate.AtEnd,
+			}, r)
+			local function field(x, caption, field, minV)
+				label({
+					Text = caption,
+					Position = UDim2.fromOffset(x, 8),
+					Size = UDim2.fromOffset(90, 12),
+					TextSize = 11,
+					TextColor3 = C.sub,
+				}, r)
+				local bf = frame({
+					Position = UDim2.fromOffset(x, 24),
+					Size = UDim2.fromOffset(90, 28),
+					BackgroundColor3 = C.black,
+					BackgroundTransparency = 0.6,
+				}, r)
+				corner(bf, 10)
+				stroke(bf, 0.9)
+				local tb = new("TextBox", {
+					BackgroundTransparency = 1,
+					BorderSizePixel = 0,
+					Position = UDim2.fromOffset(8, 0),
+					Size = UDim2.new(1, -16, 1, 0),
+					Text = tostring(ev[field]),
+					TextColor3 = C.white,
+					TextSize = 13,
+					Font = Enum.Font.GothamMedium,
+					TextXAlignment = Enum.TextXAlignment.Center,
+					ClearTextOnFocus = false,
+				}, bf)
+				tb.FocusLost:Connect(function()
+					local n = tonumber(tb.Text)
+					if n then
+						ev[field] = math.clamp(math.floor(n + 0.5), minV, 60000)
+						Cfg.dirty()
+					end
+					tb.Text = tostring(ev[field])
+				end)
+			end
+			field(170, "DELAY (ms)", "delay", 0)
+			field(272, "HOLD (ms)", "hold", 10)
+			local rm = makeButton(r, "Remove", "ghost", 76, 28, {
+				AnchorPoint = Vector2.new(1, 0.5),
+				Position = UDim2.new(1, -16, 0.5, 0),
+			})
+			rm.Button.MouseButton1Click:Connect(function()
+				table.remove(m.events, i)
+				Cfg.dirty()
+				refreshEvents()
+				refreshList()
+			end)
+		end
+	end
+
+	function refreshEditor()
+		local m = Macros.sel
+		layout()
+		if not m then
+			return
+		end
+		nameIn.Box.Text = m.name
+		speedS.Set(tonumber(m.speed) or 1, true)
+		loopsS.Set(tonumber(m.loops) or 1, true)
+		gapS.Set(tonumber(m.gap) or 0, true)
+		hkBtn.SetText(m.hotkey and tostring(m.hotkey):gsub("(%l)(%u)", "%1 %2") or "None")
+		if Macros.playing[m] then
+			playRow.Button.SetText("Stop")
+			playRow.Button.SetStyle("danger")
+		else
+			playRow.Button.SetText("Play")
+			playRow.Button.SetStyle("primary")
+		end
+	end
+
+	function selectMacro(m)
+		Macros.sel = m
+		refreshEditor()
+		refreshEvents()
+		showEditor(true)
+	end
+
+	-- ------------------------------------------------------- macro list
+	function refreshList()
+		clearGroup(gList)
+		local r = newRow(gList, 60)
+		rowLabel(r, "New macro", "Creates an empty macro to record into", 0.6)
+		local nb = makeButton(r, "New", "primary", 80, 30, {
+			AnchorPoint = Vector2.new(1, 0.5),
+			Position = UDim2.new(1, -16, 0.5, 0),
+		})
+		nb.Button.MouseButton1Click:Connect(function()
+			local m = { name = "Macro " .. (#Macros.list + 1), speed = 1, loops = 1, gap = 0, events = {} }
+			table.insert(Macros.list, m)
+			Cfg.dirty()
+			selectMacro(m)
+			refreshList()
+		end)
+		for _, m in ipairs(Macros.list) do
+			local row = newRow(gList, 60)
+			label({
+				Text = m.name,
+				Position = UDim2.fromOffset(16, 11),
+				Size = UDim2.new(1, -200, 0, 18),
+				Font = Enum.Font.GothamSemibold,
+				TextTruncate = Enum.TextTruncate.AtEnd,
+			}, row)
+			label({
+				Text = #m.events .. " keys   " .. (tonumber(m.speed) or 1) .. "x" .. (m.hotkey and ("   [" .. tostring(m.hotkey) .. "]") or ""),
+				Position = UDim2.fromOffset(16, 31),
+				Size = UDim2.new(1, -200, 0, 14),
+				TextSize = 12,
+				TextColor3 = C.sub,
+				TextTruncate = Enum.TextTruncate.AtEnd,
+			}, row)
+			local playing = Macros.playing[m] ~= nil
+			local pb = makeButton(row, playing and "Stop" or "Play", playing and "danger" or "primary", 70, 30, {
+				AnchorPoint = Vector2.new(1, 0.5),
+				Position = UDim2.new(1, -16, 0.5, 0),
+			})
+			local eb = makeButton(row, "Edit", "ghost", 64, 30, {
+				AnchorPoint = Vector2.new(1, 0.5),
+				Position = UDim2.new(1, -94, 0.5, 0),
+			})
+			pb.Button.MouseButton1Click:Connect(function()
+				if Macros.playing[m] then
+					Macros.stop(m)
+				else
+					Macros.play(m)
+				end
+			end)
+			eb.Button.MouseButton1Click:Connect(function()
+				selectMacro(m)
+			end)
+		end
+	end
+
+	-- ----------------------------------------------- record + hotkeys
+	bindConn(UserInputService.InputBegan, function(input, gp)
+		local rec = Macros.recording
+		if rec then
+			if typing() then
+				return
+			end
+			local kind, k
+			local t = input.UserInputType
+			if t == Enum.UserInputType.Keyboard then
+				kind, k = "key", input.KeyCode.Name
+			elseif not gp and (t == Enum.UserInputType.MouseButton1 or t == Enum.UserInputType.MouseButton2 or t == Enum.UserInputType.MouseButton3) then
+				kind, k = "mouse", t.Name
+			end
+			if kind and k ~= "Unknown" and not Macros.open[k] then
+				local now = os.clock()
+				local ev = {
+					kind = kind,
+					k = k,
+					delay = Macros.recLast and math.floor((now - Macros.recLast) * 1000 + 0.5) or 0,
+					hold = 80,
+				}
+				Macros.recLast = now
+				table.insert(rec.events, ev)
+				Macros.open[k] = { ev = ev, t0 = now }
+			end
+			return
+		end
+		if typing() or state.listening then
+			return
+		end
+		if input.UserInputType == Enum.UserInputType.Keyboard then
+			for _, m in ipairs(Macros.list) do
+				if m.hotkey and m.hotkey == input.KeyCode.Name then
+					if Macros.playing[m] then
+						Macros.stop(m)
+					else
+						Macros.play(m)
+					end
+				end
+			end
+		end
+	end)
+	bindConn(UserInputService.InputEnded, function(input)
+		if not Macros.recording then
+			return
+		end
+		local k = input.UserInputType == Enum.UserInputType.Keyboard and input.KeyCode.Name or input.UserInputType.Name
+		local o = Macros.open[k]
+		if o then
+			o.ev.hold = math.max(10, math.floor((os.clock() - o.t0) * 1000 + 0.5))
+			Macros.open[k] = nil
+		end
+	end)
+
+	-- ------------------------------------------------------- persistence
+	Cfg.add("macros.data", function()
+		return HttpService:JSONEncode(Macros.list)
+	end, function(str)
+		local ok, data = pcall(function()
+			return HttpService:JSONDecode(str)
+		end)
+		if not (ok and type(data) == "table") then
+			return
+		end
+		Macros.list = {}
+		for _, m in ipairs(data) do
+			if type(m) == "table" and type(m.events) == "table" then
+				table.insert(Macros.list, {
+					name = tostring(m.name or "Macro"),
+					speed = tonumber(m.speed) or 1,
+					loops = tonumber(m.loops) or 1,
+					gap = tonumber(m.gap) or 0,
+					hotkey = type(m.hotkey) == "string" and m.hotkey or nil,
+					events = m.events,
+				})
+			end
+		end
+		Macros.sel = nil
+		refreshList()
+		refreshEditor()
+		refreshEvents()
+	end, { noReset = true })
+
+	layout()
+	refreshList()
 end
 
 --========================================================================
