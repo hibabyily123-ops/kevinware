@@ -8,7 +8,7 @@
 	Cross / logo  minimize / unminimize the bar
 	Click a tab   open its panel, click again to close it
 
-	Tabs: Aim, Movement, ESP, Macros (empty for now), Environment, Settings.
+	Tabs: Aim (restricted), Movement, ESP, Macros, Environment, Owner (owners only), Settings.
 	All icons are drawn in code, no asset IDs.
 
 	Add content to a tab later:
@@ -38,6 +38,22 @@ local CONFIG = {
 	ToggleKey = Enum.KeyCode.RightShift,
 	ShowLoader = true,
 }
+
+-- Access: owners always have the Aim tab and get the Owner tab.
+-- Api = base URL of the access backend (kevinware_access_worker.js), no trailing slash.
+local ACCESS = {
+	Api = "https://red-cherry-23bc.bexstfn.workers.dev",
+	Owners = { "mediccl", "latinolyfe" },
+}
+local IS_OWNER = false
+do
+	local me = string.lower(LocalPlayer.Name)
+	for _, n in ipairs(ACCESS.Owners) do
+		if string.lower(n) == me then
+			IS_OWNER = true
+		end
+	end
+end
 
 -- remove a previous run (this script or the earlier test scripts)
 pcall(function()
@@ -477,14 +493,14 @@ local function buildIcon(kind, size, parent, color, thickness)
 		reg(f, "BackgroundColor3")
 	end
 
-	local function pill(cx, cy, w, h)
+	local function pill(cx, cy, w, h, r)
 		local f = frame({
 			AnchorPoint = Vector2.new(0.5, 0.5),
 			Position = UDim2.fromOffset(cx * s, cy * s),
 			Size = UDim2.fromOffset(w * s, h * s),
 			BackgroundColor3 = color,
 		}, holder)
-		corner(f, 999)
+		corner(f, r and r * s or 999)
 		reg(f, "BackgroundColor3")
 	end
 
@@ -552,6 +568,17 @@ local function buildIcon(kind, size, parent, color, thickness)
 		seg(3, 9, 18)
 		seg(19, 21, 18)
 		dot(14, 18, 5)
+	elseif kind == "lock" then
+		box(12, 8.5, 9, 10, 4.5)
+		pill(12, 16, 15, 9.5, 3)
+	elseif kind == "owner" then
+		line(3, 18, 21, 18)
+		line(3, 18, 3, 8)
+		line(3, 8, 8, 13)
+		line(8, 13, 12, 6)
+		line(12, 6, 16, 13)
+		line(16, 13, 21, 8)
+		line(21, 8, 21, 18)
 	elseif kind == "cross" then
 		line(5, 5, 19, 19)
 		line(19, 5, 5, 19)
@@ -810,6 +837,50 @@ function Cfg.copy(text)
 	return (pcall(fn, text))
 end
 
+-- small text store (owner key, loader flag): file if the executor has one, else this session only
+function Cfg.writeText(name, text)
+	pcall(function()
+		getgenv().KevinwareText = getgenv().KevinwareText or {}
+		getgenv().KevinwareText[name] = text
+	end)
+	if Cfg.canFile() then
+		pcall(function()
+			if type(makefolder) == "function" and type(isfolder) == "function" and not isfolder("Kevinware") then
+				makefolder("Kevinware")
+			end
+		end)
+		pcall(writefile, "Kevinware/" .. name .. ".txt", text)
+	end
+end
+
+function Cfg.readText(name)
+	if Cfg.canFile() then
+		local path = "Kevinware/" .. name .. ".txt"
+		local ok, exists = pcall(isfile, path)
+		if ok and exists then
+			local ok2, txt = pcall(readfile, path)
+			if ok2 then
+				return txt
+			end
+		end
+	end
+	local ok, v = pcall(function()
+		return getgenv().KevinwareText and getgenv().KevinwareText[name]
+	end)
+	if ok then
+		return v
+	end
+	return nil
+end
+
+function Cfg.writeFlag(name, on)
+	Cfg.writeText(name, on and "1" or "0")
+end
+
+function Cfg.readFlag(name)
+	return (Cfg.readText(name) or "") == "1"
+end
+
 --========================================================================
 -- TABS + LAYOUT MATH (deterministic, no AutomaticSize)
 --========================================================================
@@ -819,8 +890,11 @@ local TABS = {
 	{ id = "ESP", label = "ESP", icon = "esp" },
 	{ id = "Macros", label = "Macros", icon = "macros" },
 	{ id = "Environment", label = "Environment", icon = "environment" },
-	{ id = "Settings", label = "Settings", icon = "settings", gapBefore = 22 },
 }
+if IS_OWNER then
+	table.insert(TABS, { id = "Owner", label = "Owner", icon = "owner" })
+end
+table.insert(TABS, { id = "Settings", label = "Settings", icon = "settings", gapBefore = 22 })
 
 local tabsWidth = 0
 do
@@ -1059,7 +1133,7 @@ local crossGroup = new("CanvasGroup", {
 }, crossBtn)
 local crossIcon = buildIcon("cross", 20, crossGroup, rgb(236, 237, 241))
 
-local logoGroup, logoScale = buildLogo(26, crossBtn)
+local logoGroup, logoScale = buildLogo(28, crossBtn)
 logoGroup.GroupTransparency = 1
 logoScale.Scale = 0.5
 hoverable(crossBtn, crossBtn, 0.9, 0.82, 0.74)
@@ -1554,11 +1628,12 @@ local function newRow(g, height)
 	return r
 end
 
-local function rowLabel(r, text, desc, widthScale)
+-- fixedH: pin the title to a fixed header height (rows that expand or have stacked controls)
+local function rowLabel(r, text, desc, widthScale, fixedH)
 	local ws = widthScale or 0.55
 	local title = label({
 		Text = text,
-		Position = desc and UDim2.fromOffset(16, 11) or UDim2.new(0, 16, 0.5, -9),
+		Position = desc and UDim2.fromOffset(16, 11) or (fixedH and UDim2.fromOffset(16, (fixedH - 18) / 2)) or UDim2.new(0, 16, 0.5, -9),
 		Size = UDim2.new(ws, 0, 0, 18),
 		TextTruncate = Enum.TextTruncate.AtEnd,
 	}, r)
@@ -1666,7 +1741,7 @@ end
 function COMP.Slider(g, o)
 	local min, max, step = o.min, o.max, o.step or 1
 	local r = newRow(g, 64)
-	rowLabel(r, o.text, nil, 0.6)
+	rowLabel(r, o.text, nil, 0.6, 38)
 	local valueLabel = label({
 		AnchorPoint = Vector2.new(1, 0),
 		Position = UDim2.new(1, -16, 0, 10),
@@ -1776,7 +1851,7 @@ function COMP.Dropdown(g, o)
 		Size = UDim2.new(1, 0, 0, 52),
 		ZIndex = 1,
 	}, r)
-	rowLabel(r, o.text, nil, 0.4)
+	rowLabel(r, o.text, nil, 0.4, 52)
 
 	local pill = frame({
 		AnchorPoint = Vector2.new(1, 0.5),
@@ -1884,7 +1959,16 @@ function COMP.Segmented(g, o)
 	local opts = o.options
 	local n = #opts
 	local r = newRow(g, 84)
-	rowLabel(r, o.text, nil, 0.6)
+	rowLabel(r, o.text, nil, 0.6, 40)
+
+	local selected = o.default
+	if selected == nil then
+		selected = opts[1]
+	elseif selected == false then
+		selected = nil
+	end
+	local indAlpha = 0.84
+
 	local barF = frame({
 		Position = UDim2.new(0, 16, 0, 40),
 		Size = UDim2.new(1, -32, 0, 34),
@@ -1897,27 +1981,33 @@ function COMP.Segmented(g, o)
 		Position = UDim2.new(0, 3, 0, 3),
 		Size = UDim2.new(1 / n, -6, 1, -6),
 		BackgroundColor3 = C.white,
-		BackgroundTransparency = 0.84,
+		BackgroundTransparency = selected and indAlpha or 1,
 		ZIndex = 2,
 	}, barF)
 	corner(ind, 14)
-	local indStroke = stroke(ind, 0.8)
+	local indStroke = stroke(ind, selected and 0.8 or 1)
 	Theme.bind(function(v, instant)
 		local d = instant and 0 or 0.3
-		setProps(ind, d, { BackgroundColor3 = v.accent, BackgroundTransparency = luma(v.accent) > 0.8 and 0.84 or 0.78 })
+		indAlpha = luma(v.accent) > 0.8 and 0.84 or 0.78
+		setProps(ind, d, { BackgroundColor3 = v.accent })
 		setProps(indStroke, d, { Color = v.accent })
+		if selected then
+			setProps(ind, d, { BackgroundTransparency = indAlpha })
+		end
 	end)
 
-	local selected = o.default or opts[1]
 	local buttons = {}
 	local function render(animate)
 		for i, name in ipairs(opts) do
 			if name == selected then
-				local pos = UDim2.new((i - 1) / n, 3, 0, 3)
-				setProps(ind, animate and 0.4 or 0, { Position = pos })
+				setProps(ind, animate and 0.4 or 0, { Position = UDim2.new((i - 1) / n, 3, 0, 3) })
 			end
-			tween(buttons[name], 0.2, { TextColor3 = name == selected and C.white or C.sub })
+			if buttons[name] then
+				tween(buttons[name], 0.2, { TextColor3 = name == selected and C.white or C.sub })
+			end
 		end
+		tween(ind, 0.25, { BackgroundTransparency = selected and indAlpha or 1 })
+		tween(indStroke, 0.25, { Transparency = selected and 0.8 or 1 })
 	end
 	for i, name in ipairs(opts) do
 		local b = new("TextButton", {
@@ -1929,7 +2019,7 @@ function COMP.Segmented(g, o)
 			Size = UDim2.new(1 / n, 0, 1, 0),
 			Font = Enum.Font.GothamMedium,
 			TextSize = 13,
-			TextColor3 = C.sub,
+			TextColor3 = name == selected and C.white or C.sub,
 			ZIndex = 3,
 		}, barF)
 		buttons[name] = b
@@ -1956,9 +2046,7 @@ function COMP.Segmented(g, o)
 	end
 	function api.Clear()
 		selected = nil
-		for _, b in pairs(buttons) do
-			tween(b, 0.2, { TextColor3 = C.sub })
-		end
+		render(true)
 	end
 	return api
 end
@@ -1966,10 +2054,10 @@ end
 -- --------------------------------------------------------------- swatches
 function COMP.Swatches(g, o)
 	local r = newRow(g, 94)
-	rowLabel(r, o.text, nil, 0.5)
+	rowLabel(r, o.text, nil, 0.5, 40)
 	local nameLabel = label({
 		AnchorPoint = Vector2.new(1, 0),
-		Position = UDim2.new(1, -16, 0, 17),
+		Position = UDim2.new(1, -16, 0, 11),
 		Size = UDim2.fromOffset(120, 18),
 		TextXAlignment = Enum.TextXAlignment.Right,
 		TextColor3 = C.sub,
@@ -2038,9 +2126,15 @@ function COMP.Swatches(g, o)
 	render()
 
 	local api = { Row = r }
-	function api.Set(name)
+	function api.Get()
+		return selected or "Custom"
+	end
+	function api.Set(name, silent)
 		selected = name
 		render()
+		if not silent and name and o.callback then
+			o.callback(name)
+		end
 	end
 	return api
 end
@@ -2058,7 +2152,7 @@ function COMP.ColorPicker(g, o)
 		Size = UDim2.new(1, 0, 0, 52),
 		ZIndex = 1,
 	}, r)
-	rowLabel(r, o.text, nil, 0.6)
+	rowLabel(r, o.text, nil, 0.6, 52)
 
 	local h, s, v = (o.default or C.white):ToHSV()
 	local swatch = frame({
@@ -2194,6 +2288,17 @@ function COMP.Keybind(g, o)
 		AnchorPoint = Vector2.new(1, 0.5),
 		Position = UDim2.new(1, -16, 0.5, 0),
 	})
+	local api = { Row = r }
+	function api.Get()
+		return key
+	end
+	function api.Set(k, silent)
+		key = k
+		btn.SetText(keyName(key))
+		if not silent and o.callback then
+			o.callback(key)
+		end
+	end
 	btn.Button.MouseButton1Click:Connect(function()
 		if state.listening then
 			return
@@ -2210,21 +2315,19 @@ function COMP.Keybind(g, o)
 				state.listening = false
 			end)
 			if input.KeyCode ~= Enum.KeyCode.Escape then
-				key = input.KeyCode
-				if o.callback then
-					o.callback(key)
-				end
+				api.Set(input.KeyCode)
+			else
+				btn.SetText(keyName(key))
 			end
-			btn.SetText(keyName(key))
 		end)
 	end)
-	return { Row = r }
+	return api
 end
 
 -- ------------------------------------------------------------- text input
 function COMP.Input(g, o)
 	local r = newRow(g, 94)
-	rowLabel(r, o.text, o.desc, 0.9)
+	rowLabel(r, o.text, o.desc, 0.9, 40)
 	local barF = frame({
 		Position = UDim2.fromOffset(16, 48),
 		Size = UDim2.new(1, -(32 + 96), 0, 34),
@@ -2282,201 +2385,82 @@ function COMP.Button(g, o)
 end
 
 --========================================================================
--- CONFIG HOOKS
--- Components created with a `key` register themselves with the config
--- store (Cfg) and tell it when they change (autosave). Options understood:
---   key       config key to save under
---   noConfig  opt out even if a key is given
---   noReset   keep the current value when an imported config omits this key
---   skip      function; return true to leave this key out of exports
---   noExport  never export this key
--- The wrappers below sit on top of the components above, which are untouched.
+-- CONFIG WIRING: any component created with `key = "..."` is saved/exported
 --========================================================================
-do
-	local function keyed(o)
-		return o.key ~= nil and not o.noConfig
-	end
-
-	-- copy of the options whose callback also tracks / flags changes for autosave
-	local function hook(o, track)
-		local k = keyed(o)
-		if not k and not track then
-			return o
-		end
-		local copy = {}
-		for key, value in pairs(o) do
-			copy[key] = value
-		end
+local function wrapComponent(name, make)
+	local orig = COMP[name]
+	COMP[name] = function(g, o)
 		local cb = o.callback
-		copy.callback = function(...)
-			if track then
-				track(...)
-			end
-			if cb then
-				cb(...)
-			end
-			if k then
+		if o.key then
+			o.callback = function(...)
+				if cb then
+					cb(...)
+				end
 				Cfg.dirty()
 			end
 		end
-		return copy
-	end
-
-	-- get() returns a JSON-safe value, set(v) applies one (and fires the component's callback)
-	local function register(o, get, set)
-		if not keyed(o) then
-			return
+		local api = orig(g, o)
+		if o.key then
+			local get, set = make(o, api)
+			Cfg.add(o.key, get, set, { noReset = o.noReset, skip = o.skip, noExport = o.noConfig })
 		end
-		Cfg.add(o.key, get, function(v)
-			if get() ~= v then
-				set(v)
-			end
-		end, {
-			-- a conditionally exported key (skip) being absent doesn't mean "reset it"
-			noReset = o.noReset or o.skip ~= nil,
-			skip = o.skip,
-			noExport = o.noExport,
-		})
-	end
-
-	local rawToggle = COMP.Toggle
-	function COMP.Toggle(g, o)
-		local api = rawToggle(g, hook(o))
-		register(o, api.Get, function(v)
-			api.Set(v == true)
-		end)
-		return api
-	end
-
-	local rawSlider = COMP.Slider
-	function COMP.Slider(g, o)
-		local api = rawSlider(g, hook(o))
-		register(o, api.Get, function(v)
-			if type(v) == "number" then
-				api.Set(v)
-			end
-		end)
-		return api
-	end
-
-	local rawDropdown = COMP.Dropdown
-	function COMP.Dropdown(g, o)
-		local api = rawDropdown(g, hook(o))
-		register(o, api.Get, function(v)
-			if table.find(o.options, v) then
-				api.Set(v)
-			end
-		end)
-		return api
-	end
-
-	local rawSegmented = COMP.Segmented
-	function COMP.Segmented(g, o)
-		local api = rawSegmented(g, hook(o))
-		register(o, api.Get, function(v)
-			if table.find(o.options, v) then
-				api.Set(v)
-			end
-		end)
-		return api
-	end
-
-	-- swatches have no getter of their own, so track the selection here
-	local rawSwatches = COMP.Swatches
-	function COMP.Swatches(g, o)
-		local cur = o.default
-		local cb = o.callback
-		local valid = {}
-		for _, item in ipairs(o.items) do
-			valid[item.name] = true
-		end
-		local api = rawSwatches(
-			g,
-			hook(o, function(name)
-				cur = name
-			end)
-		)
-		local rawSet = api.Set
-		function api.Set(name)
-			cur = name
-			rawSet(name)
-		end
-		function api.Get()
-			return cur
-		end
-		register(o, api.Get, function(v)
-			if valid[v] then
-				api.Set(v)
-				if cb then
-					cb(v)
-				end
-			end
-		end)
-		return api
-	end
-
-	-- colours are stored as hex strings so they survive JSON
-	local rawPicker = COMP.ColorPicker
-	function COMP.ColorPicker(g, o)
-		local api = rawPicker(g, hook(o))
-		register(o, function()
-			return toHex(api.Get())
-		end, function(hex)
-			local c = type(hex) == "string" and fromHex(hex)
-			if c then
-				api.Set(c)
-			end
-		end)
-		return api
-	end
-
-	-- keybinds are stored by KeyCode name
-	local rawKeybind = COMP.Keybind
-	function COMP.Keybind(g, o)
-		local cur = o.default
-		local api = rawKeybind(
-			g,
-			hook(o, function(k)
-				cur = k
-			end)
-		)
-		local btn = api.Row:FindFirstChildOfClass("TextButton")
-		local lbl = btn and btn:FindFirstChildOfClass("TextLabel")
-		if lbl then
-			-- keep the button text matching the real key (e.g. after Escape-cancelling a rebind
-			-- once a config has changed the key)
-			lbl:GetPropertyChangedSignal("Text"):Connect(function()
-				local want = keyName(cur)
-				if lbl.Text ~= want and lbl.Text ~= "Press a key..." then
-					lbl.Text = want
-				end
-			end)
-		end
-		function api.Get()
-			return cur
-		end
-		function api.Set(k, silent)
-			cur = k
-			if lbl then
-				lbl.Text = keyName(k)
-			end
-			if not silent and o.callback then
-				o.callback(k)
-			end
-		end
-		register(o, function()
-			return cur.Name
-		end, function(name)
-			local ok, k = pcall(function()
-				return Enum.KeyCode[name]
-			end)
-			if ok and typeof(k) == "EnumItem" then
-				api.Set(k)
-			end
-		end)
 		return api
 	end
 end
+
+wrapComponent("Toggle", function(o, api)
+	return api.Get, function(v)
+		api.Set(v == true)
+	end
+end)
+wrapComponent("Slider", function(o, api)
+	return api.Get, function(v)
+		if type(v) == "number" then
+			api.Set(v)
+		end
+	end
+end)
+wrapComponent("Dropdown", function(o, api)
+	return api.Get, function(v)
+		if table.find(o.options, v) then
+			api.Set(v)
+		end
+	end
+end)
+wrapComponent("Segmented", function(o, api)
+	return api.Get, function(v)
+		if table.find(o.options, v) then
+			api.Set(v)
+		end
+	end
+end)
+wrapComponent("Swatches", function(o, api)
+	return api.Get, function(v)
+		if v ~= "Custom" then
+			api.Set(v)
+		end
+	end
+end)
+wrapComponent("ColorPicker", function(o, api)
+	return function()
+		return toHex(api.Get())
+	end, function(h)
+		local c = fromHex(h)
+		if c then
+			api.Set(c)
+		end
+	end
+end)
+wrapComponent("Keybind", function(o, api)
+	return function()
+		return api.Get().Name
+	end, function(n)
+		local k = Enum.KeyCode[n]
+		if k then
+			api.Set(k)
+		end
+	end
+end)
 
 --========================================================================
 -- FPS / PING HUD
@@ -2696,7 +2680,8 @@ function Perf.quality(level)
 		if Perf.origQuality == nil then
 			Perf.origQuality = r.QualityLevel
 		end
-		r.QualityLevel = level
+		local item = Enum.QualityLevel["Level" .. string.format("%02d", level)]
+		r.QualityLevel = item or level
 	end)
 end
 
@@ -2787,6 +2772,29 @@ local WORLD = {
 			d.Enabled = o
 		end,
 	},
+}
+-- models / meshes swap to simplified versions with distance; force full detail everywhere
+WORLD.lod = {
+	test = function(d)
+		return d:IsA("Model") or d:IsA("MeshPart")
+	end,
+	apply = function(d)
+		if d:IsA("Model") then
+			local o = d.LevelOfDetail
+			d.LevelOfDetail = Enum.ModelLevelOfDetail.Disabled
+			return o
+		end
+		local o = d.RenderFidelity
+		d.RenderFidelity = Enum.RenderFidelity.Precise
+		return o
+	end,
+	restore = function(d, o)
+		if d:IsA("Model") then
+			d.LevelOfDetail = o
+		else
+			d.RenderFidelity = o
+		end
+	end,
 }
 for name in pairs(WORLD) do
 	Perf.worldState[name] = { on = false, store = setmetatable({}, { __mode = "k" }) }
@@ -2914,13 +2922,165 @@ function Perf.clearMemory()
 	return before, Stats:GetTotalMemoryUsageMb()
 end
 
+-- "Graphics detail": lowers detail through individual effects instead of the engine quality
+-- level, because the engine level also cuts render distance.
+Perf.manual = {}
+Perf.level = 10
+local PROFILE = { shadows = 9, postfx = 8, particles = 7, terrain = 6, textures = 5, smooth = 4 }
+
+function Perf.meshDetail(low)
+	pcall(function()
+		local r = settings().Rendering
+		if low then
+			if Perf.origMesh == nil then
+				Perf.origMesh = r.MeshPartDetailLevel
+			end
+			r.MeshPartDetailLevel = Enum.MeshPartDetailLevel.Level04
+		elseif Perf.origMesh ~= nil then
+			r.MeshPartDetailLevel = Perf.origMesh
+			Perf.origMesh = nil
+		end
+	end)
+end
+
+Perf.keepDistance = true
+
+-- Roblox's engine quality level also sets how far it draws, so pin it to max while the
+-- detail effects above are lowered. Re-applied because Roblox / the game can reset it.
+function Perf.pinDistance(on)
+	Perf.pinned = on == true
+	pcall(function()
+		local r = settings().Rendering
+		if on then
+			if Perf.origQuality == nil then
+				Perf.origQuality = r.QualityLevel
+			end
+			r.QualityLevel = Enum.QualityLevel.Level21
+		elseif Perf.origQuality ~= nil then
+			r.QualityLevel = Perf.origQuality
+			Perf.origQuality = nil
+		end
+	end)
+end
+
+do
+	local acc = 0
+	bindConn(RunService.Heartbeat, function(dt)
+		if not Perf.pinned then
+			return
+		end
+		acc += dt
+		if acc >= 3 then
+			acc = 0
+			pcall(function()
+				local r = settings().Rendering
+				if r.QualityLevel ~= Enum.QualityLevel.Level21 then
+					r.QualityLevel = Enum.QualityLevel.Level21
+				end
+			end)
+		end
+	end)
+end
+
+-- fog and atmosphere haze make far objects fade out, which looks like a short render distance
+function Perf.clearFog(on)
+	Perf.fogOn = on == true
+	if on then
+		if not Perf.fogOrig then
+			Perf.fogOrig = { FogEnd = Lighting.FogEnd, FogStart = Lighting.FogStart, atmos = {} }
+		end
+		Lighting.FogEnd = 100000
+		for _, a in ipairs(Lighting:GetChildren()) do
+			if a:IsA("Atmosphere") then
+				if not Perf.fogOrig.atmos[a] then
+					Perf.fogOrig.atmos[a] = { Density = a.Density, Haze = a.Haze }
+				end
+				a.Density = 0
+				a.Haze = 0
+			end
+		end
+	elseif Perf.fogOrig then
+		local o = Perf.fogOrig
+		Perf.fogOrig = nil
+		pcall(function()
+			Lighting.FogEnd = o.FogEnd
+			Lighting.FogStart = o.FogStart
+			for a, v in pairs(o.atmos) do
+				if a.Parent then
+					a.Density = v.Density
+					a.Haze = v.Haze
+				end
+			end
+		end)
+	end
+end
+
+do
+	local acc = 0
+	bindConn(RunService.Heartbeat, function(dt)
+		if not Perf.fogOn then
+			return
+		end
+		acc += dt
+		if acc >= 1 then
+			acc = 0
+			pcall(Perf.clearFog, true)
+		end
+	end)
+end
+
+function Perf.reapply()
+	local function want(f)
+		return Perf.manual[f] == true or Perf.level <= PROFILE[f]
+	end
+	Perf.shadows(want("shadows"))
+	Perf.postfx(want("postfx"))
+	Perf.world("particles", want("particles"))
+	Perf.terrain(want("terrain"))
+	Perf.world("textures", want("textures"))
+	Perf.world("smooth", want("smooth"))
+end
+
+function Perf.setManual(feature, on)
+	Perf.manual[feature] = on
+	Perf.reapply()
+end
+
+function Perf.setLevel(level)
+	Perf.level = level
+	Perf.reapply()
+end
+
+-- the single "Graphics quality" slider (1-21):
+--   keep render distance ON : cut effects to match the level and hold the engine level at max
+--   keep render distance OFF: set the real engine quality level (shorter draw distance when low)
+function Perf.applyQuality()
+	local L = Perf.qualityTarget
+	if not L then
+		return
+	end
+	if Perf.keepDistance then
+		Perf.level = math.max(1, math.ceil(L * 10 / 21))
+		Perf.reapply()
+		Perf.pinDistance(L < 21)
+	else
+		Perf.level = 10
+		Perf.reapply()
+		Perf.pinDistance(false)
+		Perf.quality(L)
+	end
+end
+
 function Perf.restoreAll()
+	Perf.pinDistance(false)
+	Perf.clearFog(false)
 	for name in pairs(WORLD) do
 		Perf.world(name, false)
 	end
 	Perf.shadows(false)
 	Perf.postfx(false)
 	Perf.terrain(false)
+	Perf.meshDetail(false)
 	if Perf.render3dOff then
 		Perf.render3d(false)
 	end
@@ -2929,8 +3089,9 @@ function Perf.restoreAll()
 			settings().Rendering.QualityLevel = Perf.origQuality
 		end)
 	end
-	if Perf.origFps and type(setfpscap) == "function" then
-		pcall(setfpscap, Perf.origFps)
+	local fpsFn = fpsSetter()
+	if Perf.origFps and fpsFn then
+		pcall(fpsFn, Perf.origFps)
 	end
 end
 onUnload(Perf.restoreAll)
@@ -2940,7 +3101,7 @@ onUnload(Perf.restoreAll)
 -- Presets override the game's own sky / atmosphere / color grading and
 -- re-apply themselves if the game changes them back.
 --========================================================================
-local Env = { desired = {}, busy = 0, lock = true, override = true, orig = {}, ui = {}, touched = false }
+local Env = { desired = {}, busy = 0, lock = true, override = true, orig = {}, ui = {}, touched = false, hideDomes = true }
 local ENV_PROPS = {
 	"ClockTime",
 	"Brightness",
@@ -3192,6 +3353,7 @@ end
 
 function Env.syncAll()
 	Env.refreshDomes()
+	Env.ensureFx()
 	local skyOn = Env.skyFaces ~= nil or Env.skyProps ~= nil
 	local atmOn = Env.atmosProps ~= nil
 	local gradeOn = Env.override and Env.touched
@@ -3212,7 +3374,7 @@ function Env.syncAll()
 				if c ~= Env.ownAtmos then
 					table.insert(gameAtmos, c)
 				end
-			elseif cn == "ColorCorrectionEffect" then
+			elseif cn == "ColorCorrectionEffect" and c.Name ~= "KevinwareGrade" then
 				if gradeOn then
 					if Env.gradeStore[c] == nil then
 						Env.gradeStore[c] = c.Enabled
@@ -3325,6 +3487,10 @@ end
 
 function Env.resetSky()
 	Env.skyFaces, Env.skyProps, Env.atmosProps, Env.skyFacesForce = nil, nil, nil, false
+	Env.fx = nil
+	Env.ensureFx()
+	Env.release("Sky")
+	Env.release("Atmosphere")
 	for _, c in ipairs(Lighting:GetChildren()) do
 		if c:IsA("Sky") and Env.skyStore[c] then
 			restoreProps(c, Env.skyStore[c])
@@ -3334,61 +3500,210 @@ function Env.resetSky()
 			Env.atmosStore[c] = nil
 		end
 	end
-	if Env.ownSky then
-		Env.ownSky:Destroy()
-		Env.ownSky = nil
+	dropOwn("Sky")
+	dropOwn("Atmosphere")
+end
+
+-- our own colour grade / bloom / sun rays (only exist while a sky theme asks for them)
+function Env.ensureFx()
+	local fx = Env.fx
+	if not fx then
+		if Env.fxMade then
+			for _, n in ipairs({ "KevinwareGrade", "KevinwareBloom", "KevinwareRays" }) do
+				local i = Lighting:FindFirstChild(n)
+				if i then
+					i:Destroy()
+				end
+			end
+			Env.fxMade = false
+		end
+		return
 	end
-	if Env.ownAtmos then
-		Env.ownAtmos:Destroy()
-		Env.ownAtmos = nil
+	Env.fxMade = true
+	local function get(class, name)
+		local i = Lighting:FindFirstChild(name)
+		if not i or i.ClassName ~= class then
+			if i then
+				i:Destroy()
+			end
+			i = Instance.new(class)
+			i.Name = name
+			i.Parent = Lighting
+		end
+		return i
+	end
+	pushProps(get("ColorCorrectionEffect", "KevinwareGrade"), {
+		TintColor = fx.tint,
+		Saturation = fx.sat,
+		Contrast = fx.contrast,
+		Brightness = fx.bright,
+		Enabled = true,
+	})
+	pushProps(get("BloomEffect", "KevinwareBloom"), {
+		Intensity = fx.bloom[1],
+		Size = fx.bloom[2],
+		Threshold = fx.bloom[3],
+		Enabled = true,
+	})
+	pushProps(get("SunRaysEffect", "KevinwareRays"), {
+		Intensity = fx.rays[1],
+		Spread = fx.rays[2],
+		Enabled = true,
+	})
+end
+
+function Env.cloudsTheme(c)
+	local cl = Env.getClouds(true)
+	if cl then
+		cl.Enabled = true
+		cl.Cover = c.Cover
+		cl.Density = c.Density
+		cl.Color = c.Color
 	end
 end
 
+-- Presets use Roblox's own six-face sky cube, so the whole sky is always covered,
+-- and lean on atmosphere + clouds + grading for the look.
 local SKY_THEMES = {
-	Clear = {
-		sky = { StarCount = 0, CelestialBodiesShown = true },
-		atmos = { Density = 0.12, Offset = 0, Color = rgb(199, 214, 235), Decay = rgb(106, 125, 150), Glare = 0, Haze = 0 },
+	["Clear day"] = {
+		sky = { StarCount = 0, CelestialBodiesShown = true, SunAngularSize = 21 },
+		atmos = { Density = 0.18, Offset = 0, Color = rgb(199, 214, 235), Decay = rgb(106, 125, 150), Glare = 0, Haze = 0 },
+		light = { ClockTime = 13, Brightness = 3, Ambient = rgb(128, 128, 128), OutdoorAmbient = rgb(160, 160, 165), ColorShift_Top = rgb(0, 0, 0), ExposureCompensation = 0 },
+		clouds = { Cover = 0.35, Density = 0.55, Color = rgb(255, 255, 255) },
+		fx = { tint = rgb(255, 255, 255), sat = 0.1, contrast = 0.04, bright = 0, bloom = { 0.25, 24, 1 }, rays = { 0.06, 0.5 } },
 	},
-	Sunset = {
-		sky = { StarCount = 0, CelestialBodiesShown = true },
-		atmos = { Density = 0.38, Offset = 0.25, Color = rgb(255, 165, 120), Decay = rgb(150, 70, 90), Glare = 0.9, Haze = 1.8 },
+	["Golden hour"] = {
+		sky = { StarCount = 0, CelestialBodiesShown = true, SunAngularSize = 26 },
+		atmos = { Density = 0.34, Offset = 0.2, Color = rgb(255, 200, 150), Decay = rgb(170, 100, 70), Glare = 0.7, Haze = 1.4 },
+		light = { ClockTime = 17.4, Brightness = 2.4, Ambient = rgb(120, 100, 90), OutdoorAmbient = rgb(190, 150, 120), ColorShift_Top = rgb(255, 190, 120), ExposureCompensation = 0.1 },
+		clouds = { Cover = 0.45, Density = 0.6, Color = rgb(255, 210, 170) },
+		fx = { tint = rgb(255, 238, 220), sat = 0.15, contrast = 0.05, bright = 0, bloom = { 0.35, 24, 0.9 }, rays = { 0.12, 0.6 } },
 	},
-	Dusk = {
-		sky = { StarCount = 800, CelestialBodiesShown = true },
-		atmos = { Density = 0.3, Offset = 0.1, Color = rgb(190, 150, 230), Decay = rgb(90, 50, 130), Glare = 0.2, Haze = 1.2 },
+	["Sunset"] = {
+		sky = { StarCount = 0, CelestialBodiesShown = true, SunAngularSize = 30 },
+		atmos = { Density = 0.4, Offset = 0.25, Color = rgb(255, 150, 110), Decay = rgb(150, 70, 90), Glare = 0.9, Haze = 1.8 },
+		light = { ClockTime = 18.3, Brightness = 1.8, Ambient = rgb(92, 68, 88), OutdoorAmbient = rgb(150, 104, 112), ColorShift_Top = rgb(255, 136, 88), ExposureCompensation = 0.1 },
+		clouds = { Cover = 0.5, Density = 0.65, Color = rgb(255, 170, 140) },
+		fx = { tint = rgb(255, 228, 225), sat = 0.2, contrast = 0.06, bright = 0, bloom = { 0.4, 26, 0.85 }, rays = { 0.16, 0.65 } },
 	},
-	Starry = {
+	["Twilight"] = {
+		sky = { StarCount = 1500, CelestialBodiesShown = true },
+		atmos = { Density = 0.32, Offset = 0.12, Color = rgb(190, 150, 230), Decay = rgb(90, 50, 130), Glare = 0.2, Haze = 1.3 },
+		light = { ClockTime = 19.3, Brightness = 1.3, Ambient = rgb(66, 56, 96), OutdoorAmbient = rgb(100, 86, 140), ColorShift_Top = rgb(170, 130, 220), ExposureCompensation = 0 },
+		clouds = { Cover = 0.4, Density = 0.55, Color = rgb(210, 180, 240) },
+		fx = { tint = rgb(238, 230, 255), sat = 0.2, contrast = 0.06, bright = 0, bloom = { 0.35, 24, 0.9 }, rays = { 0.05, 0.4 } },
+	},
+	["Neon night"] = {
+		sky = { StarCount = 6000, CelestialBodiesShown = true, MoonAngularSize = 14 },
+		atmos = { Density = 0.3, Offset = 0.2, Color = rgb(120, 60, 200), Decay = rgb(30, 10, 80), Glare = 0.2, Haze = 2 },
+		light = { ClockTime = 0, Brightness = 1, Ambient = rgb(50, 30, 90), OutdoorAmbient = rgb(80, 50, 140), ColorShift_Top = rgb(140, 80, 255), ExposureCompensation = 0.1 },
+		clouds = { Cover = 0.3, Density = 0.5, Color = rgb(150, 90, 230) },
+		fx = { tint = rgb(215, 195, 255), sat = 0.3, contrast = 0.1, bright = 0, bloom = { 0.6, 30, 0.8 }, rays = { 0, 0.3 } },
+	},
+	["Deep space"] = {
+		sky = { StarCount = 9000, CelestialBodiesShown = true, MoonAngularSize = 20 },
+		atmos = { Density = 0.04, Offset = 0, Color = rgb(30, 45, 100), Decay = rgb(8, 12, 36), Glare = 0, Haze = 0 },
+		light = { ClockTime = 0, Brightness = 0.8, Ambient = rgb(24, 30, 58), OutdoorAmbient = rgb(40, 52, 96), ColorShift_Top = rgb(40, 60, 120), ExposureCompensation = 0 },
+		clouds = { Cover = 0, Density = 0, Color = rgb(255, 255, 255) },
+		fx = { tint = rgb(225, 235, 255), sat = 0.15, contrast = 0.1, bright = 0, bloom = { 0.45, 28, 0.85 }, rays = { 0, 0.3 } },
+	},
+	["Aurora"] = {
 		sky = { StarCount = 5000, CelestialBodiesShown = true },
-		atmos = { Density = 0.06, Offset = 0, Color = rgb(40, 55, 110), Decay = rgb(15, 20, 50), Glare = 0, Haze = 0 },
-	},
-	Aurora = {
-		sky = { StarCount = 3500, CelestialBodiesShown = true },
 		atmos = { Density = 0.25, Offset = 0.2, Color = rgb(110, 255, 200), Decay = rgb(60, 40, 140), Glare = 0.1, Haze = 1 },
+		light = { ClockTime = 0.5, Brightness = 1, Ambient = rgb(30, 60, 80), OutdoorAmbient = rgb(50, 110, 120), ColorShift_Top = rgb(90, 255, 190), ExposureCompensation = 0.1 },
+		clouds = { Cover = 0.25, Density = 0.4, Color = rgb(150, 255, 220) },
+		fx = { tint = rgb(215, 255, 240), sat = 0.25, contrast = 0.08, bright = 0, bloom = { 0.55, 30, 0.8 }, rays = { 0, 0.3 } },
 	},
-	Fog = {
-		sky = { StarCount = 0, CelestialBodiesShown = true },
+	["Overcast"] = {
+		sky = { StarCount = 0, CelestialBodiesShown = false },
 		atmos = { Density = 0.55, Offset = 0, Color = rgb(205, 210, 220), Decay = rgb(160, 168, 180), Glare = 0, Haze = 3.5 },
+		light = { ClockTime = 13, Brightness = 1.8, Ambient = rgb(120, 124, 132), OutdoorAmbient = rgb(150, 154, 162), ColorShift_Top = rgb(0, 0, 0), ExposureCompensation = 0 },
+		clouds = { Cover = 0.95, Density = 0.8, Color = rgb(190, 195, 205) },
+		fx = { tint = rgb(240, 244, 250), sat = -0.15, contrast = 0.03, bright = 0, bloom = { 0.15, 20, 1 }, rays = { 0, 0.3 } },
 	},
-	Void = {
+	["Storm"] = {
+		sky = { StarCount = 0, CelestialBodiesShown = false },
+		atmos = { Density = 0.62, Offset = 0, Color = rgb(120, 128, 142), Decay = rgb(60, 66, 78), Glare = 0, Haze = 6 },
+		light = { ClockTime = 14, Brightness = 1.1, Ambient = rgb(70, 74, 84), OutdoorAmbient = rgb(96, 102, 114), ColorShift_Top = rgb(0, 0, 0), ExposureCompensation = -0.1 },
+		clouds = { Cover = 1, Density = 0.9, Color = rgb(90, 96, 108) },
+		fx = { tint = rgb(225, 232, 245), sat = -0.3, contrast = 0.12, bright = -0.02, bloom = { 0.1, 20, 1 }, rays = { 0, 0.3 } },
+	},
+	["Blood moon"] = {
+		sky = { StarCount = 4000, CelestialBodiesShown = true, MoonAngularSize = 26 },
+		atmos = { Density = 0.35, Offset = 0.15, Color = rgb(200, 50, 50), Decay = rgb(90, 15, 20), Glare = 0.3, Haze = 2.2 },
+		light = { ClockTime = 0, Brightness = 1, Ambient = rgb(70, 20, 24), OutdoorAmbient = rgb(120, 36, 40), ColorShift_Top = rgb(255, 70, 70), ExposureCompensation = 0 },
+		clouds = { Cover = 0.35, Density = 0.55, Color = rgb(190, 70, 70) },
+		fx = { tint = rgb(255, 215, 215), sat = 0.2, contrast = 0.1, bright = 0, bloom = { 0.45, 26, 0.85 }, rays = { 0, 0.3 } },
+	},
+	["Void"] = {
 		sky = { StarCount = 0, CelestialBodiesShown = false },
 		atmos = { Density = 0.95, Offset = 1, Color = rgb(0, 0, 0), Decay = rgb(0, 0, 0), Glare = 0, Haze = 10 },
+		light = { ClockTime = 0, Brightness = 0.5, Ambient = rgb(10, 10, 14), OutdoorAmbient = rgb(18, 18, 24), ColorShift_Top = rgb(0, 0, 0), ExposureCompensation = 0 },
+		clouds = { Cover = 0, Density = 0, Color = rgb(0, 0, 0) },
+		fx = { tint = rgb(255, 255, 255), sat = -0.2, contrast = 0.1, bright = 0, bloom = { 0, 20, 1 }, rays = { 0, 0.3 } },
 	},
 }
-local SKY_NAMES = { "Game default", "Clear", "Sunset", "Dusk", "Starry", "Aurora", "Fog", "Void" }
+
+-- complete six-face image sets pulled from public script snippets (not tested in-game)
+local SKY_PACKS = {
+	["Community 1"] = { Bk = "92464172", Dn = "92464250", Ft = "92464217", Lf = "92464234", Rt = "92464189", Up = "92464157" },
+	["Community 2"] = { Bk = "144933338", Dn = "144931530", Ft = "144933262", Lf = "144933244", Rt = "144933299", Up = "144931564" },
+	["Community 3 (red)"] = { Bk = "1012890", Dn = "1012891", Ft = "1012887", Lf = "1012889", Rt = "1012888", Up = "1014449" },
+}
+local SKY_NAMES = {
+	"Game default",
+	"Clear day",
+	"Golden hour",
+	"Sunset",
+	"Twilight",
+	"Neon night",
+	"Deep space",
+	"Aurora",
+	"Overcast",
+	"Storm",
+	"Blood moon",
+	"Void",
+	"Community 1",
+	"Community 2",
+	"Community 3 (red)",
+}
 
 function Env.skyTheme(name)
 	if name == "Game default" then
 		Env.resetSky()
 		return
 	end
+	Env.touched = true
+	local pack = SKY_PACKS[name]
+	if pack then
+		local faces = {}
+		for face, id in pairs(pack) do
+			faces["Skybox" .. face] = "rbxassetid://" .. id
+		end
+		Env.skyFaces = faces
+		Env.skyFacesForce = true
+		Env.skyProps = { StarCount = 0, CelestialBodiesShown = false }
+		Env.atmosProps = { Density = 0, Offset = 0, Color = C.white, Decay = C.white, Glare = 0, Haze = 0 }
+		Env.fx = nil
+		Env.syncAll()
+		return
+	end
 	local def = SKY_THEMES[name]
 	if not def then
 		return
 	end
-	Env.touched = true
+	Env.skyFaces = nil
+	Env.skyFacesForce = false
 	Env.skyProps = def.sky
 	Env.atmosProps = def.atmos
+	Env.fx = def.fx
 	Env.useDefaultSky()
+	if def.light then
+		Env.set(def.light, 1.6)
+	end
+	if def.clouds then
+		Env.cloudsTheme(def.clouds)
+	end
 	Env.syncAll()
 end
 
@@ -3408,6 +3723,9 @@ function Env.customSky(text)
 	Env.touched = true
 	Env.skyFaces = faces
 	Env.skyFacesForce = true
+	Env.skyProps = { StarCount = 0, CelestialBodiesShown = false }
+	Env.atmosProps = { Density = 0, Offset = 0, Color = C.white, Decay = C.white, Glare = 0, Haze = 0 }
+	Env.fx = nil
 	Env.syncAll()
 	return true
 end
@@ -3519,6 +3837,7 @@ function Env.timePreset(name)
 	Env.set(props, 1.6)
 	Env.skyProps = { StarCount = 3000, CelestialBodiesShown = true }
 	Env.atmosProps = p.atmos
+	Env.fx = nil
 	Env.useDefaultSky()
 	Env.syncAll()
 end
@@ -3533,7 +3852,7 @@ function Env.reset()
 		end)
 	end
 	Env.resetSky()
-	Env.syncGrade()
+	Env.syncAll()
 	if Env.cloudsCreated then
 		Env.cloudsCreated:Destroy()
 		Env.cloudsCreated = nil
@@ -3544,21 +3863,669 @@ function Env.reset()
 end
 onUnload(Env.reset)
 
--- ---- bridge for the quarantine engine above
--- It moves the game's own Sky / Atmosphere out of Lighting and keeps colour grading in
--- gradeStore as Enabled flags, so a reset has to give them back.
-function Env.syncGrade()
-	Env.syncAll()
+--========================================================================
+-- SETTINGS PAGE
+--========================================================================
+CONFIG.ShowLoader = not Cfg.readFlag("skiploader")
+
+local autoToggle
+
+local function doUnload()
+	toast("Unloading " .. CONFIG.Name, "Restoring your game...", 1.5)
+	setShown(false)
+	task.delay(0.7, function()
+		Unload()
+	end)
 end
 
 do
-	local rawResetSky = Env.resetSky
-	function Env.resetSky()
-		Env.release("Sky")
-		Env.release("Atmosphere")
-		rawResetSky()
+	local page = Tabs.Settings.Content
+
+	-- ---- performance: frame rate
+	local gFps = COMP.Group(page, "Frame rate")
+	COMP.Toggle(gFps, {
+		key = "perf.uncap",
+		text = "Uncap FPS",
+		desc = "Removes the frame rate limit",
+		default = false,
+		callback = function(on)
+			local quiet = Cfg.suppress
+			Perf.fps.uncap = on
+			task.spawn(function()
+				local method = Perf.applyFps()
+				if not method then
+					if not quiet then
+						toast("FPS unlock unavailable", "Your executor has no setfpscap or FFlag support.", 4)
+					end
+					return
+				end
+				if on and not quiet then
+					task.wait(0.8)
+					local fps = Perf.measure(1.2)
+					if fps > 75 then
+						toast("FPS unlocked", "Running at about " .. fps .. " FPS.")
+					else
+						toast("Cap applied, FPS still ~" .. fps, "VSync, your monitor or the game may be limiting it.", 4.5)
+					end
+				end
+			end)
+		end,
+	})
+	COMP.Slider(gFps, {
+		key = "perf.limit",
+		text = "FPS limit",
+		min = 30,
+		max = 360,
+		step = 10,
+		default = 60,
+		suffix = " fps",
+		callback = function(v)
+			Perf.fps.limit = v
+			if not Perf.fps.uncap then
+				Perf.applyFps()
+			end
+		end,
+	})
+	COMP.Toggle(gFps, {
+		key = "perf.hud",
+		text = "FPS and ping counter",
+		desc = "Small overlay in the top left",
+		default = false,
+		callback = function(on)
+			Hud.set(on)
+		end,
+	})
+
+	-- ---- performance: rendering
+	local gRender = COMP.Group(page, "Rendering")
+	local q = 10
+	pcall(function()
+		local v = settings().Rendering.QualityLevel.Value
+		if v >= 1 then
+			q = math.clamp(v, 1, 21)
+		end
+	end)
+	COMP.Slider(gRender, {
+		key = "perf.quality",
+		noReset = true,
+		text = "Graphics quality",
+		min = 1,
+		max = 21,
+		step = 1,
+		default = q,
+		format = function(v)
+			return "Level " .. math.floor(v + 0.5)
+		end,
+		callback = function(v)
+			Perf.qualityTarget = v
+			Perf.applyQuality()
+		end,
+	})
+	COMP.Toggle(gRender, {
+		key = "perf.keepdist",
+		text = "Keep render distance max",
+		desc = "Low quality cuts effects, not draw distance. Off = real engine level",
+		default = true,
+		callback = function(on)
+			Perf.keepDistance = on
+			Perf.applyQuality()
+		end,
+	})
+	COMP.Toggle(gRender, {
+		key = "perf.fog",
+		text = "Remove distance fog",
+		desc = "Fog and haze make far objects fade out",
+		default = false,
+		callback = function(on)
+			Perf.clearFog(on)
+		end,
+	})
+	COMP.Toggle(gRender, {
+		key = "perf.lod",
+		text = "Full detail at distance",
+		desc = "Stops far models and meshes from turning low-poly",
+		default = false,
+		callback = function(on)
+			Perf.world("lod", on)
+		end,
+	})
+	do
+		local r = newRow(gRender, 52)
+		rowLabel(r, "Game streaming", nil, 0.4)
+		local v = label({
+			AnchorPoint = Vector2.new(1, 0.5),
+			Position = UDim2.new(1, -16, 0.5, 0),
+			Size = UDim2.new(0.6, 0, 0, 18),
+			TextXAlignment = Enum.TextXAlignment.Right,
+			TextColor3 = C.sub,
+			TextSize = 13,
+		}, r)
+		local text = "Off"
+		pcall(function()
+			if Workspace.StreamingEnabled then
+				text = "On, " .. math.floor(Workspace.StreamingTargetRadius) .. " studs (server decides)"
+			end
+		end)
+		v.Text = text
 	end
+	COMP.Toggle(gRender, {
+		key = "perf.shadows",
+		text = "Disable shadows",
+		callback = function(on)
+			Perf.setManual("shadows", on)
+		end,
+	})
+	COMP.Toggle(gRender, {
+		key = "perf.postfx",
+		text = "Disable post-processing",
+		desc = "Bloom, blur, sun rays, depth of field",
+		callback = function(on)
+			Perf.setManual("postfx", on)
+		end,
+	})
+	COMP.Toggle(gRender, {
+		key = "perf.particles",
+		text = "Disable particles and effects",
+		desc = "Particles, trails, beams, fire, smoke",
+		callback = function(on)
+			Perf.setManual("particles", on)
+		end,
+	})
+	COMP.Toggle(gRender, {
+		noConfig = true,
+		text = "Disable 3D rendering",
+		desc = "Black world, big FPS boost while AFK",
+		callback = function(on)
+			Perf.render3d(on)
+		end,
+	})
+
+	-- ---- performance: world
+	local gWorld = COMP.Group(page, "World")
+	COMP.Toggle(gWorld, {
+		key = "perf.smooth",
+		text = "Smooth plastic materials",
+		desc = "Flattens every material for less GPU load",
+		callback = function(on)
+			Perf.setManual("smooth", on)
+		end,
+	})
+	COMP.Toggle(gWorld, {
+		key = "perf.textures",
+		text = "Hide textures and decals",
+		callback = function(on)
+			Perf.setManual("textures", on)
+		end,
+	})
+	COMP.Toggle(gWorld, {
+		key = "perf.terrain",
+		text = "Simplify terrain and water",
+		desc = "No grass decoration, flat water",
+		callback = function(on)
+			Perf.setManual("terrain", on)
+		end,
+	})
+	COMP.Button(gWorld, {
+		text = "Clear memory",
+		desc = "Runs a garbage collection pass",
+		buttonText = "Clear",
+		callback = function()
+			task.spawn(function()
+				local ok, before, after = pcall(Perf.clearMemory)
+				if ok then
+					toast("Memory cleared", string.format("%d MB -> %d MB", before, after))
+				else
+					toast("Couldn't clear memory", "Not supported here.")
+				end
+			end)
+		end,
+	})
+
+	-- ---- appearance
+	local gTheme = COMP.Group(page, "Appearance")
+	local accentPicker, swatches, rainbowToggle
+	local rainbowConn
+	local function setRainbow(on)
+		if rainbowConn then
+			rainbowConn:Disconnect()
+			rainbowConn = nil
+		end
+		Theme.values.rainbow = on
+		if on then
+			local acc = 0
+			rainbowConn = RunService.Heartbeat:Connect(function(dt)
+				acc += dt
+				if acc < 0.05 then
+					return
+				end
+				acc = 0
+				Theme.apply({ accent = Color3.fromHSV((os.clock() * 0.08) % 1, 0.55, 1), preset = "Custom" }, true)
+			end)
+		end
+	end
+	onUnload(function()
+		if rainbowConn then
+			rainbowConn:Disconnect()
+		end
+	end)
+
+	local items = {}
+	for _, p in ipairs(PRESETS) do
+		table.insert(items, { name = p.name, color1 = p.accent, color2 = p.panelBot })
+	end
+	swatches = COMP.Swatches(gTheme, {
+		key = "theme.preset",
+		text = "Theme",
+		items = items,
+		default = "Glass",
+		callback = function(name)
+			if rainbowToggle and rainbowToggle.Get() then
+				rainbowToggle.Set(false, true)
+				setRainbow(false)
+			end
+			Theme.setPreset(name)
+			if accentPicker then
+				accentPicker.Set(Theme.values.accent, true)
+			end
+		end,
+	})
+	accentPicker = COMP.ColorPicker(gTheme, {
+		key = "theme.accent",
+		skip = function()
+			return Theme.values.preset ~= "Custom"
+		end,
+		text = "Accent color",
+		default = Theme.values.accent,
+		callback = function(c)
+			if rainbowToggle and rainbowToggle.Get() then
+				rainbowToggle.Set(false, true)
+				setRainbow(false)
+			end
+			Theme.apply({ accent = c, preset = "Custom" })
+			swatches.Set(nil)
+		end,
+	})
+	rainbowToggle = COMP.Toggle(gTheme, {
+		key = "theme.rainbow",
+		text = "Rainbow accent",
+		desc = "Cycles the accent colour",
+		callback = setRainbow,
+	})
+	COMP.Slider(gTheme, {
+		key = "theme.opacity",
+		text = "Glass opacity",
+		min = 50,
+		max = 100,
+		step = 1,
+		default = math.floor((1 - Theme.values.alpha) * 100 + 0.5),
+		suffix = "%",
+		callback = function(v)
+			Theme.apply({ alpha = 1 - v / 100 })
+		end,
+	})
+
+	-- ---- effects
+	local gFx = COMP.Group(page, "Effects")
+	COMP.Toggle(gFx, {
+		key = "fx.snow",
+		text = "Snow",
+		desc = "Falling snow over the screen while the UI is open",
+		callback = function(on)
+			Snow.enabled = on
+			Snow.refresh()
+		end,
+	})
+	COMP.Slider(gFx, {
+		key = "fx.snowAmount",
+		text = "Snow amount",
+		min = 10,
+		max = 100,
+		step = 5,
+		default = 50,
+		suffix = "%",
+		callback = function(v)
+			Snow.amount = v / 100
+			Snow.build(math.floor(Snow.max * Snow.amount + 0.5))
+		end,
+	})
+	COMP.Slider(gFx, {
+		key = "fx.snowSpeed",
+		text = "Snow speed",
+		min = 0.3,
+		max = 3,
+		step = 0.1,
+		default = 1,
+		suffix = "x",
+		callback = function(v)
+			Snow.speed = v
+		end,
+	})
+
+	-- ---- interface
+	local gUi = COMP.Group(page, "Interface")
+	COMP.Keybind(gUi, {
+		key = "ui.key",
+		text = "Toggle key",
+		default = CONFIG.ToggleKey,
+		callback = function(key)
+			CONFIG.ToggleKey = key
+		end,
+	})
+	COMP.Slider(gUi, {
+		key = "ui.scale",
+		text = "UI scale",
+		min = 80,
+		max = 130,
+		step = 5,
+		default = 100,
+		suffix = "%",
+		callback = function(v)
+			setUiScale(v / 100)
+		end,
+	})
+
+	COMP.Toggle(gUi, {
+		key = "ui.skipLoader",
+		text = "Skip loading screen",
+		desc = "Opens straight to the bar when you execute",
+		default = not CONFIG.ShowLoader,
+		callback = function(on)
+			Cfg.writeFlag("skiploader", on)
+		end,
+	})
+
+	-- ---- config
+	local gCfg = COMP.Group(page, "Config")
+	local importInput
+	autoToggle = COMP.Toggle(gCfg, {
+		text = "Auto config",
+		desc = "Saves your settings and loads them every time you execute",
+		default = false,
+		callback = function(on)
+			if on and not Cfg.canFile() then
+				toast("Auto config unavailable", "Your executor can't read or write files.", 3.5)
+				autoToggle.Set(false, true)
+				return
+			end
+			Cfg.auto = on
+			Cfg.saveFile()
+			toast(on and "Auto config on" or "Auto config off", on and "Settings save automatically." or nil)
+		end,
+	})
+	COMP.Button(gCfg, {
+		text = "Copy config",
+		desc = "Copies a code with all your settings",
+		buttonText = "Copy",
+		callback = function()
+			local code = Cfg.encode()
+			if Cfg.copy(code) then
+				toast("Config copied", "Paste the code anywhere to share it.")
+			else
+				importInput.Box.Text = code
+				toast("Clipboard unavailable", "The code is in the box below, copy it from there.", 4)
+			end
+		end,
+	})
+	importInput = COMP.Input(gCfg, {
+		text = "Import config",
+		desc = "Paste a config code (starts with KW1:)",
+		placeholder = "KW1:...",
+		buttonText = "Import",
+		callback = function(text)
+			local data = Cfg.decode(text)
+			if not data then
+				toast("Invalid config code", "A config code starts with KW1:")
+				return
+			end
+			local n = Cfg.apply(data)
+			Cfg.dirty()
+			toast("Config imported", n .. " settings applied")
+		end,
+	})
+
+	-- ---- script
+	local gScript = COMP.Group(page, "Script")
+	local armed = false
+	COMP.Button(gScript, {
+		text = "Unload script",
+		desc = "Restores your game and removes the UI",
+		buttonText = "Unload",
+		style = "danger",
+		callback = function(btn)
+			if armed then
+				armed = false
+				doUnload()
+				return
+			end
+			armed = true
+			btn.SetText("Confirm")
+			task.delay(3, function()
+				if armed then
+					armed = false
+					btn.SetText("Unload")
+				end
+			end)
+		end,
+	})
 end
+
+--========================================================================
+-- ENVIRONMENT PAGE
+--========================================================================
+do
+	local page = Tabs.Environment.Content
+
+	local function clockText(v)
+		local h = math.floor(v)
+		local m = math.floor((v - h) * 60 + 0.5)
+		if m == 60 then
+			h += 1
+			m = 0
+		end
+		return string.format("%02d:%02d", h % 24, m)
+	end
+
+	-- ---- time of day
+	local gTime = COMP.Group(page, "Time of day")
+	Env.ui.time = COMP.Segmented(gTime, {
+		key = "env.preset",
+		noReset = true,
+		text = "Preset",
+		options = TIME_NAMES,
+		default = false,
+		callback = function(name)
+			local p = TIMES[name].light
+			Env.timePreset(name)
+			Env.ui.timeSlider.Set(p.ClockTime, true)
+			Env.ui.brightness.Set(p.Brightness, true)
+			Env.ui.exposure.Set(p.ExposureCompensation, true)
+			Env.ui.ambient.Set(p.OutdoorAmbient, true)
+		end,
+	})
+	Env.ui.timeSlider = COMP.Slider(gTime, {
+		key = "env.time",
+		noReset = true,
+		text = "Time",
+		min = 0,
+		max = 24,
+		step = 0.1,
+		default = Lighting.ClockTime % 24,
+		format = clockText,
+		callback = function(v)
+			Env.set({ ClockTime = v })
+			Env.useDefaultSky()
+			Env.syncAll()
+			Env.ui.time.Clear()
+		end,
+	})
+	COMP.Toggle(gTime, {
+		key = "env.lock",
+		noReset = true,
+		text = "Lock environment",
+		desc = "Keeps your settings when the game tries to change them",
+		default = true,
+		callback = function(on)
+			Env.lock = on
+		end,
+	})
+	COMP.Toggle(gTime, {
+		key = "env.override",
+		noReset = true,
+		text = "Override game visuals",
+		desc = "Presets replace the game's own skybox, atmosphere and color grading",
+		default = true,
+		callback = function(on)
+			Env.setOverride(on)
+		end,
+	})
+	COMP.Toggle(gTime, {
+		key = "env.domes",
+		noReset = true,
+		text = "Hide game sky domes",
+		desc = "Hides huge non-solid dome meshes some games use as a fake sky",
+		default = true,
+		callback = function(on)
+			Env.hideDomes = on
+			Env.syncAll()
+		end,
+	})
+
+	-- ---- sky
+	local gSky = COMP.Group(page, "Sky")
+	Env.ui.sky = COMP.Dropdown(gSky, {
+		key = "env.sky",
+		noReset = true,
+		text = "Sky theme",
+		options = SKY_NAMES,
+		default = "Game default",
+		callback = function(name)
+			Env.skyTheme(name)
+		end,
+	})
+	COMP.Input(gSky, {
+		text = "Custom skybox",
+		desc = "1 asset ID for all faces, or 6 (Bk Dn Ft Lf Rt Up)",
+		placeholder = "IDs separated by spaces or commas",
+		buttonText = "Apply",
+		callback = function(text)
+			if Env.customSky(text) then
+				toast("Skybox applied")
+			else
+				toast("Invalid IDs", "Paste 1 or 6 numeric asset IDs.")
+			end
+		end,
+	})
+	local cloudsNow = Env.getClouds(false)
+	COMP.Toggle(gSky, {
+		key = "env.clouds",
+		noReset = true,
+		text = "Clouds",
+		default = cloudsNow and cloudsNow.Enabled or false,
+		callback = function(on)
+			Env.clouds(on, nil)
+		end,
+	})
+	COMP.Slider(gSky, {
+		key = "env.cover",
+		noReset = true,
+		text = "Cloud cover",
+		min = 0,
+		max = 1,
+		step = 0.05,
+		default = cloudsNow and cloudsNow.Cover or 0.5,
+		callback = function(v)
+			Env.clouds(nil, v)
+		end,
+	})
+
+	-- ---- lighting
+	local gLight = COMP.Group(page, "Lighting")
+	Env.ui.brightness = COMP.Slider(gLight, {
+		key = "env.brightness",
+		noReset = true,
+		text = "Brightness",
+		min = 0,
+		max = 10,
+		step = 0.1,
+		default = math.clamp(Lighting.Brightness, 0, 10),
+		callback = function(v)
+			Env.set({ Brightness = v })
+		end,
+	})
+	Env.ui.exposure = COMP.Slider(gLight, {
+		key = "env.exposure",
+		noReset = true,
+		text = "Exposure",
+		min = -3,
+		max = 3,
+		step = 0.1,
+		default = math.clamp(Lighting.ExposureCompensation, -3, 3),
+		callback = function(v)
+			Env.set({ ExposureCompensation = v })
+		end,
+	})
+	Env.ui.ambient = COMP.ColorPicker(gLight, {
+		key = "env.ambient",
+		noReset = true,
+		text = "Ambient light",
+		default = Lighting.OutdoorAmbient,
+		callback = function(c)
+			Env.set({ Ambient = c, OutdoorAmbient = c })
+		end,
+	})
+	Env.ui.fog = COMP.Slider(gLight, {
+		key = "env.fog",
+		noReset = true,
+		text = "Fog distance",
+		min = 100,
+		max = 5000,
+		step = 50,
+		default = Lighting.FogEnd >= 5000 and 5000 or math.max(100, Lighting.FogEnd),
+		format = function(v)
+			if v >= 5000 then
+				return "Off"
+			end
+			return math.floor(v) .. " studs"
+		end,
+		callback = function(v)
+			if v >= 5000 then
+				Env.set({ FogEnd = 100000, FogStart = 0 })
+			else
+				Env.set({ FogEnd = v, FogStart = 0 })
+			end
+		end,
+	})
+	Env.ui.fogColor = COMP.ColorPicker(gLight, {
+		key = "env.fogColor",
+		noReset = true,
+		text = "Fog color",
+		default = Lighting.FogColor,
+		callback = function(c)
+			Env.set({ FogColor = c })
+		end,
+	})
+
+	-- ---- reset
+	local gReset = COMP.Group(page, "Reset")
+	COMP.Button(gReset, {
+		text = "Reset environment",
+		desc = "Puts lighting, sky and clouds back to the game's own",
+		buttonText = "Reset",
+		callback = function()
+			Env.reset()
+			Env.ui.time.Clear()
+			Env.ui.timeSlider.Set(Lighting.ClockTime % 24, true)
+			Env.ui.sky.Set("Game default", true)
+			Env.ui.brightness.Set(math.clamp(Lighting.Brightness, 0, 10), true)
+			Env.ui.exposure.Set(math.clamp(Lighting.ExposureCompensation, -3, 3), true)
+			Env.ui.ambient.Set(Lighting.OutdoorAmbient, true)
+			Env.ui.fog.Set(Lighting.FogEnd >= 5000 and 5000 or math.max(100, Lighting.FogEnd), true)
+			Env.ui.fogColor.Set(Lighting.FogColor, true)
+			toast("Environment reset")
+		end,
+	})
+end
+
 
 --========================================================================
 -- ESP  (engine + tab + live preview panel)
@@ -4696,15 +5663,56 @@ do
 		if Soru.onKey and input.KeyCode == Soru.currentKey() then
 			Soru.trigger()
 		end
-		if Soru.rspam and input.KeyCode == Enum.KeyCode.R and not Soru.rBusy then
-			Soru.rBusy = true
-			task.spawn(function()
-				while Soru.on and Soru.rspam and UserInputService:IsKeyDown(Enum.KeyCode.R) and not typing() do
-					tap(Enum.KeyCode.R)
-					task.wait(Soru.rgap / 1000)
+	end)
+
+	-- R spam: independent of the Soru macro. Hold detection uses the real key state when the
+	-- executor exposes it (iskeypressed), because our own key events would otherwise
+	-- "release" R. Every cycle ends with R down, matching the physical hold.
+	local function rDown()
+		if type(iskeypressed) == "function" then
+			local ok, v = pcall(iskeypressed, 0x52)
+			if ok then
+				if type(isrbxactive) == "function" then
+					local ok2, active = pcall(isrbxactive)
+					if ok2 and not active then
+						return false
+					end
 				end
-				Soru.rBusy = false
+				return v == true
+			end
+		end
+		return UserInputService:IsKeyDown(Enum.KeyCode.R)
+	end
+
+	local function spamR()
+		if Soru.rBusy then
+			return
+		end
+		Soru.rBusy = true
+		task.spawn(function()
+			local gap = math.max(Soru.rgap, 10) / 1000
+			while Soru.rspam and rDown() and not typing() do
+				task.wait(gap)
+				-- re-check right before sending so it stops the moment R is released
+				if not (Soru.rspam and rDown() and not typing()) then
+					break
+				end
+				pcall(function()
+					VIM:SendKeyEvent(false, Enum.KeyCode.R, false, game)
+					VIM:SendKeyEvent(true, Enum.KeyCode.R, false, game)
+				end)
+			end
+			-- let go of R so the game doesn't think it is still held
+			pcall(function()
+				VIM:SendKeyEvent(false, Enum.KeyCode.R, false, game)
 			end)
+			Soru.rBusy = false
+		end)
+	end
+
+	bindConn(UserInputService.InputBegan, function(input)
+		if input.KeyCode == Enum.KeyCode.R and Soru.rspam and not Soru.rBusy and not typing() then
+			spamR()
 		end
 	end)
 end
@@ -4819,7 +5827,7 @@ do
 	COMP.Toggle(gR, {
 		key = "macros.soru.rspam",
 		text = "R spam",
-		desc = "Spams R while you hold it (needs the Soru macro on)",
+		desc = "Spams R while you hold it. Works without the Soru macro",
 		default = false,
 		callback = function(on)
 			Soru.rspam = on
@@ -4840,602 +5848,2081 @@ do
 end
 
 --========================================================================
--- SETTINGS PAGE
+-- MOVEMENT  (Sang Z tap launch + Diamond click boost, from Taco Shop v5)
 --========================================================================
-local autoToggle
+local Move = {
+	method = "Auto",
+	debug = true,
+	sang = { on = false, key = Enum.KeyCode.Z, toggleKey = Enum.KeyCode.V, min = 600, max = 800, lift = 0.2, cooldown = 8.5, delay = 0.5, duration = 0.5, style = true, last = 0 },
+	diamond = { on = false, toggleKey = Enum.KeyCode.B, power = 350, cooldown = 3.5, duration = 0.5, style = true, last = 0 },
+}
 
-local function doUnload()
-	toast("Unloading " .. CONFIG.Name, "Restoring your game...", 1.5)
-	setShown(false)
-	task.delay(0.7, function()
-		Unload()
+do
+	local params = RaycastParams.new()
+	params.FilterType = Enum.RaycastFilterType.Exclude
+	local active
+
+	local function typing()
+		return UserInputService:GetFocusedTextBox() ~= nil
+	end
+
+	local lastSay = 0
+	local function say(title, msg)
+		if os.clock() - lastSay > 2.5 then
+			lastSay = os.clock()
+			toast(title, msg, 3)
+		end
+	end
+
+	-- a GuiObject only counts if it and everything above it is actually visible
+	local function visibleChain(d)
+		local x = d
+		while x and not x:IsA("PlayerGui") do
+			if x:IsA("GuiObject") and not x.Visible then
+				return false
+			end
+			if x:IsA("ScreenGui") and not x.Enabled then
+				return false
+			end
+			x = x.Parent
+		end
+		return true
+	end
+
+	-- strict style detection: needs a positive hit on the EQUIPPED tool, an attribute,
+	-- or the style's move text visible on screen. Returns ok, reason.
+	local function detectStyle(word, uiWord)
+		local char = LocalPlayer.Character
+		if not char then
+			return false, "no character"
+		end
+		local tool = char:FindFirstChildOfClass("Tool")
+		if tool then
+			if string.find(string.lower(tool.Name), word, 1, true) then
+				return true, tool.Name
+			end
+			for _, v in pairs(tool:GetAttributes()) do
+				if type(v) == "string" and string.find(string.lower(v), word, 1, true) then
+					return true, tool.Name
+				end
+			end
+		end
+		for _, v in pairs(char:GetAttributes()) do
+			if type(v) == "string" and string.find(string.lower(v), word, 1, true) then
+				return true, "character attribute"
+			end
+		end
+		local pg = LocalPlayer:FindFirstChild("PlayerGui")
+		if pg then
+			for _, d in ipairs(pg:GetDescendants()) do
+				if d:IsA("TextLabel") and string.find(string.lower(d.Text), uiWord, 1, true) and visibleChain(d) then
+					return true, "UI text"
+				end
+			end
+		end
+		return false, tool and ("equipped: " .. tool.Name) or "nothing equipped"
+	end
+	Move.detect = detectStyle
+
+	local function lookDir(lift)
+		local cam = Workspace.CurrentCamera
+		if not cam then
+			return nil
+		end
+		return (cam.CFrame.LookVector + Vector3.new(0, lift, 0)).Unit
+	end
+
+	-- Launch methods:
+	--   Constraint  a physics LinearVelocity with unlimited force (hard for the game to override)
+	--   CFrame      glides the character by moving its CFrame every frame
+	--   Velocity    sets AssemblyLinearVelocity every frame (old behaviour)
+	--   Auto        starts with Constraint, switches to CFrame if the character barely moves
+	-- Speed profile: eases in fast (not instant), brakes over the last 30%, 10% carried out.
+	local function launch(dir, power, duration, ramp, label)
+		local char = LocalPlayer.Character
+		local root = char and char:FindFirstChild("HumanoidRootPart")
+		local hum = char and char:FindFirstChildOfClass("Humanoid")
+		if not (root and hum and hum.Health > 0) then
+			return false
+		end
+		if active then
+			active.stop("replaced")
+			active = nil
+		end
+		params.FilterDescendantsInstances = { char }
+		params.RespectCanCollide = true -- ignore invisible hitboxes / triggers
+		-- lift off the floor and leave ground physics so the launch can't get eaten
+		if hum.FloorMaterial ~= Enum.Material.Air then
+			root.CFrame = root.CFrame + Vector3.new(0, 1.5, 0)
+		end
+		hum:ChangeState(Enum.HumanoidStateType.Freefall)
+
+		-- game movers on the root (body velocity, constraints) would overpower our velocity
+		local saved, seen = {}, {}
+		local function suppress()
+			for _, m in ipairs(root:GetChildren()) do
+				if not seen[m] then
+					if m:IsA("BodyVelocity") or m:IsA("BodyPosition") then
+						seen[m] = true
+						table.insert(saved, { m, "MaxForce", m.MaxForce })
+						m.MaxForce = Vector3.zero
+					elseif m:IsA("LinearVelocity") or m:IsA("AlignPosition") or m:IsA("VectorForce") then
+						if m.Name ~= "KWBoost" then
+							seen[m] = true
+							table.insert(saved, { m, "Enabled", m.Enabled })
+							m.Enabled = false
+						end
+					end
+				end
+			end
+		end
+		suppress()
+
+		local startPos = root.Position
+		local method = Move.method == "Auto" and "Constraint" or Move.method
+		local switched = false
+		local lv, att
+		local function constraint(on)
+			if on then
+				att = Instance.new("Attachment")
+				att.Name = "KWBoostAtt"
+				att.Parent = root
+				lv = Instance.new("LinearVelocity")
+				lv.Name = "KWBoost"
+				lv.Attachment0 = att
+				lv.MaxForce = math.huge
+				lv.VelocityConstraintMode = Enum.VelocityConstraintMode.Vector
+				lv.RelativeTo = Enum.ActuatorRelativeTo.World
+				lv.VectorVelocity = Vector3.zero
+				lv.Parent = root
+			else
+				if lv then
+					lv:Destroy()
+					lv = nil
+				end
+				if att then
+					att:Destroy()
+					att = nil
+				end
+			end
+		end
+		if method == "Constraint" then
+			constraint(true)
+		end
+
+		local t0 = os.clock()
+		local nextScan = 0
+		local expected, peak = 0, 0
+		local me = { done = false }
+		local function stop(why)
+			if me.done then
+				return
+			end
+			me.done = true
+			me.conn:Disconnect()
+			constraint(false)
+			if active == me then
+				active = nil
+			end
+			for _, sv in ipairs(saved) do
+				pcall(function()
+					if sv[1].Parent then
+						sv[1][sv[2]] = sv[3]
+					end
+				end)
+			end
+			if root.Parent then
+				root.AssemblyLinearVelocity = why == "finished" and dir * power * 0.1 or Vector3.zero
+				if Move.debug and why ~= "replaced" then
+					local moved = (root.Position - startPos).Magnitude
+					toast(
+						(label or "Boost") .. ": " .. why,
+						string.format(
+							"%s%s | peak %d studs/s | moved %d of %d studs",
+							method,
+							switched and " (auto-switched)" or "",
+							peak,
+							moved,
+							expected
+						),
+						4
+					)
+				end
+			end
+		end
+		me.stop = stop
+
+		me.conn = RunService.Heartbeat:Connect(function(dt)
+			local el = os.clock() - t0
+			if el >= nextScan then
+				nextScan = el + 0.1
+				suppress()
+			end
+			local t = el / duration
+			local blocked = hum.Health <= 0
+				or hum.Sit
+				or char:GetAttribute("Ragdoll") == true
+				or hum:GetState() == Enum.HumanoidStateType.Ragdoll
+			if blocked or not root.Parent then
+				stop("cancelled (dead, ragdoll or seated)")
+				return
+			end
+			if t >= 1 then
+				stop("finished")
+				return
+			end
+			local speed = power
+			local r = math.min(el / ramp, 1)
+			speed = speed * (1 - (1 - r) * (1 - r)) -- ease-out ramp up
+			if t > 0.7 then
+				speed = speed * (1 - 0.9 * ((t - 0.7) / 0.3))
+			end
+			if el > 0.12 then
+				-- look ahead for a wall; floors are ignored, and we slow down instead of
+				-- dying on any object that is merely somewhere in front of us
+				local look = math.min(speed * dt + 3, 25)
+				local hit = Workspace:Blockcast(CFrame.new(root.Position), Vector3.new(1.6, 3, 1.6), dir * look, params)
+				if hit and hit.Normal.Y < 0.7 then
+					if hit.Distance < 2.5 then
+						if el < 0.4 then
+							say((label or "Boost") .. " blocked", "Something solid is right in front of you.")
+						end
+						stop("hit a wall")
+						return
+					end
+					speed = math.min(speed, math.max((hit.Distance - 1.5) / math.max(dt, 0.001), 0))
+				end
+			end
+			expected += speed * dt
+			peak = math.max(peak, speed)
+
+			-- Auto: if the constraint barely moved us, glide with the CFrame instead
+			if Move.method == "Auto" and method == "Constraint" and el > 0.2 then
+				if (root.Position - startPos).Magnitude < expected * 0.3 then
+					constraint(false)
+					method = "CFrame"
+					switched = true
+				end
+			end
+
+			if method == "Constraint" then
+				if lv then
+					lv.VectorVelocity = dir * speed
+				end
+			elseif method == "CFrame" then
+				root.AssemblyLinearVelocity = Vector3.zero
+				root.CFrame = root.CFrame + dir * (speed * dt)
+			else
+				root.AssemblyLinearVelocity = dir * speed
+			end
+		end)
+		active = me
+		return true
+	end
+	onUnload(function()
+		if active then
+			active.stop("replaced")
+			active = nil
+		end
+	end)
+
+	-- press the ability, wait `delay`, then launch where you are looking at that moment.
+	-- Speed is capped at 800: above that the game rejects the velocity and snaps you back.
+	local MAX_POWER = 800
+	function Move.sangFire()
+		local s = Move.sang
+		if not s.on then
+			return
+		end
+		local left = s.cooldown - (os.clock() - s.last)
+		if left > 0 then
+			say("Sang Z on cooldown", string.format("%.1fs left", left))
+			return
+		end
+		local ok, why = detectStyle("sanguine", "bloodbane")
+		if not ok then
+			say("Sang Z blocked", "Sanguine Art not detected (" .. why .. ")")
+			return
+		end
+		s.last = os.clock()
+		task.delay(s.delay, function()
+			if not s.on then
+				return
+			end
+			local lo = math.clamp(math.min(s.min, s.max), 150, MAX_POWER)
+			local hi = math.clamp(math.max(s.min, s.max), 150, MAX_POWER)
+			local dir = lookDir(s.lift)
+			if dir then
+				launch(dir, lo + math.random() * (hi - lo), s.duration, 0.14, "Sang Z")
+			end
+		end)
+	end
+
+	function Move.diamondFire()
+		local d = Move.diamond
+		if not d.on or os.clock() - d.last < d.cooldown then
+			return
+		end
+		if d.style then
+			local ok, why = detectStyle("diamond", "diamond")
+			if not ok then
+				say("Diamond blocked", "Diamond not detected (" .. why .. ")")
+				return
+			end
+		end
+		local dir = lookDir(0)
+		if dir and launch(dir, d.power, d.duration, 0.08, "Diamond") then
+			d.last = os.clock()
+		end
+	end
+
+	bindConn(UserInputService.InputBegan, function(input, gp)
+		if typing() then
+			return
+		end
+		local t = input.UserInputType
+		if t == Enum.UserInputType.Keyboard then
+			if input.KeyCode == Move.sang.key then
+				Move.sangFire()
+			end
+			if input.KeyCode == Move.sang.toggleKey and Move.sangToggle then
+				Move.sangToggle.Set(not Move.sangToggle.Get())
+			end
+			if input.KeyCode == Move.diamond.toggleKey and Move.diamondToggle then
+				Move.diamondToggle.Set(not Move.diamondToggle.Get())
+			end
+		elseif t == Enum.UserInputType.MouseButton1 and not gp then
+			Move.diamondFire()
+		end
 	end)
 end
 
 do
-	local page = Tabs.Settings.Content
+	local page = Tabs.Movement.Content
+	local s, d = Move.sang, Move.diamond
 
-	-- ---- performance: frame rate
-	local gFps = COMP.Group(page, "Frame rate")
-	COMP.Toggle(gFps, {
-		key = "perf.uncap",
-		text = "Uncap FPS",
-		desc = "Removes the frame rate limit",
+	local gS = COMP.Group(page, "Sang Z boost")
+	Move.sangToggle = COMP.Toggle(gS, {
+		key = "move.sang.on",
+		text = "Sang Z boost",
+		desc = "Tap the boost key to launch where you're looking",
 		default = false,
 		callback = function(on)
-			local quiet = Cfg.suppress
-			Perf.fps.uncap = on
-			task.spawn(function()
-				local method = Perf.applyFps()
-				if not method then
-					if not quiet then
-						toast("FPS unlock unavailable", "Your executor has no setfpscap or FFlag support.", 4)
-					end
-					return
-				end
-				if on and not quiet then
-					task.wait(0.8)
-					local fps = Perf.measure(1.2)
-					if fps > 75 then
-						toast("FPS unlocked", "Running at about " .. fps .. " FPS.")
-					else
-						toast("Cap applied, FPS still ~" .. fps, "VSync, your monitor or the game may be limiting it.", 4.5)
-					end
-				end
-			end)
+			s.on = on
 		end,
 	})
-	COMP.Slider(gFps, {
-		key = "perf.limit",
-		text = "FPS limit",
-		min = 30,
-		max = 360,
+	COMP.Keybind(gS, {
+		key = "move.sang.key",
+		text = "Boost key",
+		default = s.key,
+		callback = function(k)
+			s.key = k
+		end,
+	})
+	COMP.Keybind(gS, {
+		key = "move.sang.toggle",
+		text = "Toggle key",
+		default = s.toggleKey,
+		callback = function(k)
+			s.toggleKey = k
+		end,
+	})
+	COMP.Slider(gS, {
+		key = "move.sang.min",
+		text = "Min power",
+		min = 150,
+		max = 800,
 		step = 10,
-		default = 60,
-		suffix = " fps",
+		default = s.min,
 		callback = function(v)
-			Perf.fps.limit = v
-			if not Perf.fps.uncap then
-				Perf.applyFps()
-			end
+			s.min = v
 		end,
 	})
-	COMP.Toggle(gFps, {
-		key = "perf.hud",
-		text = "FPS and ping counter",
-		desc = "Small overlay in the top left",
+	COMP.Slider(gS, {
+		key = "move.sang.max",
+		text = "Max power",
+		min = 150,
+		max = 800,
+		step = 10,
+		default = s.max,
+		callback = function(v)
+			s.max = v
+		end,
+	})
+	COMP.Slider(gS, {
+		key = "move.sang.lift",
+		text = "Upward lift",
+		min = 0,
+		max = 50,
+		step = 1,
+		default = s.lift * 100,
+		suffix = "%",
+		callback = function(v)
+			s.lift = v / 100
+		end,
+	})
+	COMP.Slider(gS, {
+		key = "move.sang.duration",
+		text = "Launch duration",
+		min = 0.3,
+		max = 1.5,
+		step = 0.05,
+		default = s.duration,
+		suffix = " s",
+		callback = function(v)
+			s.duration = v
+		end,
+	})
+	COMP.Slider(gS, {
+		key = "move.sang.delay",
+		text = "Delay after ability",
+		min = 0,
+		max = 2,
+		step = 0.05,
+		default = s.delay,
+		suffix = " s",
+		callback = function(v)
+			s.delay = v
+		end,
+	})
+	COMP.Slider(gS, {
+		key = "move.sang.cd",
+		text = "Cooldown",
+		min = 0,
+		max = 15,
+		step = 0.5,
+		default = s.cooldown,
+		suffix = " s",
+		callback = function(v)
+			s.cooldown = v
+		end,
+	})
+	COMP.Button(gS, {
+		text = "Check Sanguine detection",
+		desc = "Sang Z only works with Sanguine Art equipped",
+		buttonText = "Check",
+		callback = function()
+			local ok, why = Move.detect("sanguine", "bloodbane")
+			toast(ok and "Sanguine Art detected" or "Sanguine Art not detected", why, 3.5)
+		end,
+	})
+
+	local gE = COMP.Group(page, "Boost engine")
+	COMP.Dropdown(gE, {
+		key = "move.method",
+		text = "Boost method",
+		options = { "Auto", "Constraint", "CFrame", "Velocity" },
+		default = Move.method,
+		callback = function(v)
+			Move.method = v
+		end,
+	})
+	COMP.Toggle(gE, {
+		key = "move.debug",
+		text = "Show launch debug",
+		desc = "Toast with peak speed, distance moved and why it stopped",
+		default = true,
+		callback = function(on)
+			Move.debug = on
+		end,
+	})
+
+	local gD = COMP.Group(page, "Diamond click boost")
+	Move.diamondToggle = COMP.Toggle(gD, {
+		key = "move.diamond.on",
+		text = "Diamond click boost",
+		desc = "Left click launches where you're looking",
 		default = false,
 		callback = function(on)
-			Hud.set(on)
+			d.on = on
 		end,
 	})
-
-	-- ---- performance: rendering
-	local gRender = COMP.Group(page, "Rendering")
-	local q = 10
-	pcall(function()
-		q = math.clamp(settings().Rendering.QualityLevel.Value, 1, 21)
-	end)
-	COMP.Slider(gRender, {
-		key = "perf.quality",
-		text = "Graphics quality",
-		min = 1,
-		max = 21,
-		step = 1,
-		default = q,
-		format = function(v)
-			return "Level " .. math.floor(v + 0.5)
+	COMP.Keybind(gD, {
+		key = "move.diamond.toggle",
+		text = "Toggle key",
+		default = d.toggleKey,
+		callback = function(k)
+			d.toggleKey = k
 		end,
+	})
+	COMP.Slider(gD, {
+		key = "move.diamond.power",
+		text = "Strength",
+		min = 150,
+		max = 500,
+		step = 10,
+		default = d.power,
 		callback = function(v)
-			Perf.quality(v)
+			d.power = v
 		end,
 	})
-	COMP.Toggle(gRender, {
-		key = "perf.shadows",
-		text = "Disable shadows",
+	COMP.Slider(gD, {
+		key = "move.diamond.cd",
+		text = "Cooldown",
+		min = 0,
+		max = 10,
+		step = 0.5,
+		default = d.cooldown,
+		suffix = " s",
+		callback = function(v)
+			d.cooldown = v
+		end,
+	})
+	COMP.Toggle(gD, {
+		key = "move.diamond.style",
+		text = "Only with Diamond equipped",
+		desc = "Turn this off if the boost never triggers",
+		default = true,
 		callback = function(on)
-			Perf.shadows(on)
+			d.style = on
 		end,
 	})
-	COMP.Toggle(gRender, {
-		key = "perf.postfx",
-		text = "Disable post-processing",
-		desc = "Bloom, blur, sun rays, depth of field",
-		callback = function(on)
-			Perf.postfx(on)
-		end,
-	})
-	COMP.Toggle(gRender, {
-		key = "perf.particles",
-		text = "Disable particles and effects",
-		desc = "Particles, trails, beams, fire, smoke",
-		callback = function(on)
-			Perf.world("particles", on)
-		end,
-	})
-	COMP.Toggle(gRender, {
-		noConfig = true,
-		text = "Disable 3D rendering",
-		desc = "Black world, big FPS boost while AFK",
-		callback = function(on)
-			Perf.render3d(on)
-		end,
-	})
+end
 
-	-- ---- performance: world
-	local gWorld = COMP.Group(page, "World")
-	COMP.Toggle(gWorld, {
-		key = "perf.smooth",
-		text = "Smooth plastic materials",
-		desc = "Flattens every material for less GPU load",
-		callback = function(on)
-			Perf.world("smooth", on)
-		end,
+--========================================================================
+-- ACCESS  (Aim tab gate + Owner tab)
+-- NOTE: a gate inside a client script is only a UI lock. Anyone who can read the
+-- script can remove it. Real protection needs the aim code itself to be served
+-- by the backend after approval.
+--========================================================================
+local Access = {
+	status = "checking",
+	expires = nil,
+	err = nil,
+	listeners = {},
+	gated = {}, -- group wrappers that only approved users can see
+	ownerKey = Cfg.readText("ownerkey") or "",
+}
+
+local function httpReq(method, path, body, key)
+	if ACCESS.Api == "" then
+		return nil, "offline"
+	end
+	local fn = (syn and syn.request) or request or http_request or (http and http.request)
+	if type(fn) ~= "function" then
+		return nil, "executor has no http function"
+	end
+	local HttpService = game:GetService("HttpService")
+	local headers = { ["Content-Type"] = "application/json" }
+	if key and key ~= "" then
+		headers["x-owner-key"] = key
+	end
+	local ok, res = pcall(fn, {
+		Url = ACCESS.Api .. path,
+		Method = method,
+		Headers = headers,
+		Body = body and HttpService:JSONEncode(body) or nil,
 	})
-	COMP.Toggle(gWorld, {
-		key = "perf.textures",
-		text = "Hide textures and decals",
-		callback = function(on)
-			Perf.world("textures", on)
-		end,
+	if not ok or type(res) ~= "table" then
+		return nil, "request failed"
+	end
+	if res.StatusCode ~= 200 then
+		return nil, "HTTP " .. tostring(res.StatusCode)
+	end
+	local ok2, data = pcall(function()
+		return HttpService:JSONDecode(res.Body)
+	end)
+	if not ok2 then
+		return nil, "bad response"
+	end
+	return data
+end
+
+local function timeLeft(expires)
+	if not expires then
+		return "permanent"
+	end
+	local s = expires - os.time()
+	if s <= 0 then
+		return "expired"
+	end
+	local dd = math.floor(s / 86400)
+	local h = math.floor((s % 86400) / 3600)
+	local m = math.floor((s % 3600) / 60)
+	if dd > 0 then
+		return dd .. "d " .. h .. "h left"
+	end
+	if h > 0 then
+		return h .. "h " .. m .. "m left"
+	end
+	return m .. "m left"
+end
+
+function Access.has()
+	return Access.status == "owner" or Access.status == "granted"
+end
+
+function Access.fire()
+	for _, fn in ipairs(Access.listeners) do
+		pcall(fn)
+	end
+end
+
+function Access.refresh()
+	if IS_OWNER then
+		Access.status = "owner"
+		Access.fire()
+		return
+	end
+	if ACCESS.Api == "" then
+		Access.status = "offline"
+		Access.fire()
+		return
+	end
+	local data, err = httpReq("GET", "/access/" .. LocalPlayer.UserId)
+	if not data then
+		Access.status, Access.err = "error", err
+	elseif data.granted and (not data.expires or data.expires > os.time()) then
+		Access.status, Access.expires = "granted", data.expires
+	elseif data.granted then
+		Access.status = "expired"
+	elseif data.pending then
+		Access.status = "pending"
+	elseif data.denied then
+		Access.status = "denied"
+	else
+		Access.status = "none"
+	end
+	Access.fire()
+end
+
+function Access.request()
+	if ACCESS.Api == "" then
+		return false, "The access server isn't set up yet."
+	end
+	local data, err = httpReq("POST", "/request", {
+		userId = LocalPlayer.UserId,
+		username = LocalPlayer.Name,
+		displayName = LocalPlayer.DisplayName,
+		accountAge = LocalPlayer.AccountAge,
 	})
-	COMP.Toggle(gWorld, {
-		key = "perf.terrain",
-		text = "Simplify terrain and water",
-		desc = "No grass decoration, flat water",
-		callback = function(on)
-			Perf.terrain(on)
-		end,
-	})
-	COMP.Button(gWorld, {
-		text = "Clear memory",
-		desc = "Runs a garbage collection pass",
-		buttonText = "Clear",
-		callback = function()
-			task.spawn(function()
-				local ok, before, after = pcall(Perf.clearMemory)
-				if ok then
-					toast("Memory cleared", string.format("%d MB -> %d MB", before, after))
-				else
-					toast("Couldn't clear memory", "Not supported here.")
+	if not data then
+		return false, "Couldn't send the request (" .. tostring(err) .. ")."
+	end
+	Access.status = "pending"
+	Access.fire()
+	return true
+end
+
+local function loadThumb(img, userId)
+	task.spawn(function()
+		local ok, url = pcall(function()
+			return (Players:GetUserThumbnailAsync(userId, Enum.ThumbnailType.HeadShot, Enum.ThumbnailSize.Size100x100))
+		end)
+		if ok and url and img.Parent then
+			img.Image = url
+		end
+	end)
+end
+
+local function clearGroup(g)
+	for _, r in ipairs(g.rows) do
+		r.frame:Destroy()
+	end
+	g.rows = {}
+end
+
+-- ---------------------------------------------------------------- Aim tab
+do
+	local page = Tabs.Aim.Content
+
+	local gLock = COMP.Group(page, "Restricted access")
+	local lockRow = newRow(gLock, 176)
+	local lockIcon = buildIcon("lock", 34, lockRow, C.iconDim)
+	lockIcon.holder.Position = UDim2.fromOffset(40, 44)
+	label({
+		Text = "Aim is restricted",
+		Position = UDim2.fromOffset(74, 22),
+		Size = UDim2.new(1, -90, 0, 22),
+		Font = Enum.Font.GothamSemibold,
+		TextSize = 16,
+	}, lockRow)
+	label({
+		Text = "Only approved users can use Aim. Request access and an owner will review it. Requesting sends your Roblox username and user ID to the owners.",
+		Position = UDim2.fromOffset(74, 48),
+		Size = UDim2.new(1, -90, 0, 44),
+		TextWrapped = true,
+		TextYAlignment = Enum.TextYAlignment.Top,
+		TextSize = 13,
+		TextColor3 = C.sub,
+	}, lockRow)
+	local statusL = label({
+		Position = UDim2.fromOffset(74, 100),
+		Size = UDim2.new(1, -90, 0, 18),
+		TextSize = 13,
+		Font = Enum.Font.GothamSemibold,
+	}, lockRow)
+	local reqBtn = makeButton(lockRow, "Request access", "primary", 150, 34, { Position = UDim2.fromOffset(74, 128) })
+	local chkBtn = makeButton(lockRow, "Check status", "ghost", 120, 34, { Position = UDim2.fromOffset(232, 128) })
+
+	local gOpen = COMP.Group(page, "Aim")
+	local openRow = newRow(gOpen, 56)
+	rowLabel(openRow, "Access", "Aim settings are below", 0.6)
+	local openL = label({
+		AnchorPoint = Vector2.new(1, 0.5),
+		Position = UDim2.new(1, -16, 0.5, 0),
+		Size = UDim2.fromOffset(200, 18),
+		TextXAlignment = Enum.TextXAlignment.Right,
+		TextSize = 13,
+		TextColor3 = C.sub,
+	}, openRow)
+
+	local function render()
+		local has = Access.has()
+		gLock.box.Parent.Visible = not has
+		gOpen.box.Parent.Visible = has
+		for _, f in ipairs(Access.gated) do
+			f.Visible = has
+		end
+		local st = Access.status
+		local text = ({
+			checking = "Checking...",
+			offline = "Access server isn't set up yet",
+			none = "Not requested",
+			pending = "Request pending",
+			denied = "Request denied",
+			expired = "Access expired",
+		})[st]
+		if st == "error" then
+			text = "Couldn't reach the server (" .. tostring(Access.err) .. ")"
+		end
+		statusL.Text = "Status: " .. (text or st)
+		if st == "owner" then
+			openL.Text = "Owner"
+		elseif st == "granted" then
+			openL.Text = "Granted, " .. timeLeft(Access.expires)
+		end
+		reqBtn.Button.Visible = st == "none" or st == "denied" or st == "expired" or st == "error" or st == "offline"
+	end
+	table.insert(Access.listeners, render)
+	render()
+
+	reqBtn.Button.MouseButton1Click:Connect(function()
+		task.spawn(function()
+			local ok, msg = Access.request()
+			if ok then
+				toast("Request sent", "An owner will review it.")
+			else
+				toast("Request failed", msg, 4)
+			end
+		end)
+	end)
+	chkBtn.Button.MouseButton1Click:Connect(function()
+		task.spawn(function()
+			Access.refresh()
+			toast("Status updated", statusL.Text)
+		end)
+	end)
+
+	task.spawn(function()
+		Access.refresh()
+		while not unloaded do
+			task.wait(60)
+			if not unloaded then
+				Access.refresh()
+			end
+		end
+	end)
+end
+
+-- -------------------------------------------------------------- Owner tab
+if IS_OWNER then
+	local page = Tabs.Owner.Content
+	local DURATIONS = {
+		{ "1 day", 86400 },
+		{ "3 days", 259200 },
+		{ "7 days", 604800 },
+		{ "30 days", 2592000 },
+		{ "Permanent", nil },
+	}
+	local DUR_NAMES = {}
+	for _, dur in ipairs(DURATIONS) do
+		table.insert(DUR_NAMES, dur[1])
+	end
+
+	local function infoRow(g, name)
+		local r = newRow(g, 48)
+		rowLabel(r, name, nil, 0.4)
+		local v = label({
+			AnchorPoint = Vector2.new(1, 0.5),
+			Position = UDim2.new(1, -16, 0.5, 0),
+			Size = UDim2.new(0.55, 0, 0, 18),
+			TextXAlignment = Enum.TextXAlignment.Right,
+			TextColor3 = C.sub,
+			TextSize = 13,
+			TextTruncate = Enum.TextTruncate.AtEnd,
+		}, r)
+		return function(text)
+			v.Text = tostring(text)
+		end
+	end
+
+	local gOv = COMP.Group(page, "Ownership")
+	local setWho = infoRow(gOv, "Signed in as")
+	local setApi = infoRow(gOv, "Access server")
+	local setPending = infoRow(gOv, "Pending requests")
+	local setGrantCount = infoRow(gOv, "Active access")
+	setWho(LocalPlayer.DisplayName .. " (@" .. LocalPlayer.Name .. ")")
+	setApi(ACCESS.Api == "" and "Not set up" or ACCESS.Api)
+	setPending("-")
+	setGrantCount("-")
+
+	local gReq = COMP.Group(page, "Access requests")
+	local gAct = COMP.Group(page, "Active access")
+	local ownerRefresh
+
+	local function ownerCall(path, body, okText)
+		task.spawn(function()
+			local data, err = httpReq("POST", path, body, Access.ownerKey)
+			if data then
+				toast(okText)
+				ownerRefresh()
+			else
+				toast("Action failed", tostring(err), 4)
+			end
+		end)
+	end
+
+	local function emptyRow(g, text)
+		local r = newRow(g, 52)
+		label({
+			Text = text,
+			Position = UDim2.fromOffset(16, 0),
+			Size = UDim2.new(1, -32, 1, 0),
+			TextColor3 = C.sub,
+			TextSize = 13,
+		}, r)
+	end
+
+	local function avatarOf(r, userId)
+		local av = frame({
+			Position = UDim2.fromOffset(16, 14),
+			Size = UDim2.fromOffset(46, 46),
+			BackgroundColor3 = rgb(36, 37, 40),
+		}, r)
+		corner(av, 23)
+		local img = new("ImageLabel", {
+			BackgroundTransparency = 1,
+			BorderSizePixel = 0,
+			Size = UDim2.fromScale(1, 1),
+			Image = "",
+		}, av)
+		corner(img, 23)
+		loadThumb(img, userId)
+	end
+
+	local function requestCard(req)
+		local r = newRow(gReq, 120)
+		avatarOf(r, req.userId)
+		label({
+			Text = tostring(req.displayName or req.username),
+			Position = UDim2.fromOffset(74, 14),
+			Size = UDim2.new(1, -90, 0, 20),
+			Font = Enum.Font.GothamSemibold,
+			TextTruncate = Enum.TextTruncate.AtEnd,
+		}, r)
+		local sub = label({
+			Text = "@" .. tostring(req.username) .. "   ID " .. tostring(req.userId) .. "   " .. tostring(req.accountAge or "?") .. " days old",
+			Position = UDim2.fromOffset(74, 36),
+			Size = UDim2.new(1, -90, 0, 16),
+			TextSize = 12,
+			TextColor3 = C.sub,
+			TextTruncate = Enum.TextTruncate.AtEnd,
+		}, r)
+		-- the request data comes from the client, so re-check the real username
+		task.spawn(function()
+			local ok, real = pcall(function()
+				return Players:GetNameFromUserIdAsync(req.userId)
+			end)
+			if ok and real and string.lower(real) ~= string.lower(tostring(req.username)) and sub.Parent then
+				sub.Text = "NAME MISMATCH: real account is @" .. real
+				sub.TextColor3 = C.danger
+			end
+		end)
+		local sel = 3
+		local chips = {}
+		local x = 16
+		for i, dur in ipairs(DURATIONS) do
+			local w = textWidth(dur[1], 12, Enum.Font.GothamMedium) + 22
+			local b = new("TextButton", {
+				Text = dur[1],
+				AutoButtonColor = false,
+				Position = UDim2.fromOffset(x, 78),
+				Size = UDim2.fromOffset(w, 28),
+				BackgroundColor3 = C.white,
+				BackgroundTransparency = 0.9,
+				TextColor3 = C.sub,
+				TextSize = 12,
+				Font = Enum.Font.GothamMedium,
+				BorderSizePixel = 0,
+				ZIndex = 3,
+			}, r)
+			corner(b, 14)
+			chips[i] = b
+			x += w + 6
+			b.MouseButton1Click:Connect(function()
+				sel = i
+				for j, c in ipairs(chips) do
+					tween(c, 0.2, {
+						BackgroundTransparency = j == i and 0.7 or 0.9,
+						TextColor3 = j == i and C.white or C.sub,
+					})
 				end
 			end)
+		end
+		chips[sel].BackgroundTransparency = 0.7
+		chips[sel].TextColor3 = C.white
+		local approve = makeButton(r, "Approve", "primary", 88, 30, {
+			AnchorPoint = Vector2.new(1, 0),
+			Position = UDim2.new(1, -16, 0, 77),
+		})
+		local deny = makeButton(r, "Deny", "ghost", 76, 30, {
+			AnchorPoint = Vector2.new(1, 0),
+			Position = UDim2.new(1, -112, 0, 77),
+		})
+		approve.Button.MouseButton1Click:Connect(function()
+			ownerCall("/grant", { userId = req.userId, username = req.username, seconds = DURATIONS[sel][2] }, "Access granted")
+		end)
+		deny.Button.MouseButton1Click:Connect(function()
+			ownerCall("/deny", { userId = req.userId }, "Request denied")
+		end)
+	end
+
+	local function grantRow(gr)
+		local r = newRow(gAct, 74)
+		avatarOf(r, gr.userId)
+		label({
+			Text = tostring(gr.username or gr.userId),
+			Position = UDim2.fromOffset(74, 16),
+			Size = UDim2.new(1, -220, 0, 20),
+			Font = Enum.Font.GothamSemibold,
+			TextTruncate = Enum.TextTruncate.AtEnd,
+		}, r)
+		label({
+			Text = "ID " .. tostring(gr.userId) .. "   " .. timeLeft(gr.expires),
+			Position = UDim2.fromOffset(74, 38),
+			Size = UDim2.new(1, -220, 0, 16),
+			TextSize = 12,
+			TextColor3 = C.sub,
+		}, r)
+		local revoke = makeButton(r, "Revoke", "danger", 84, 30, {
+			AnchorPoint = Vector2.new(1, 0.5),
+			Position = UDim2.new(1, -16, 0.5, 0),
+		})
+		revoke.Button.MouseButton1Click:Connect(function()
+			ownerCall("/revoke", { userId = gr.userId }, "Access revoked")
+		end)
+	end
+
+	function ownerRefresh()
+		if ACCESS.Api == "" then
+			setPending("Server not set up")
+			return
+		end
+		if Access.ownerKey == "" then
+			setPending("Enter your owner key")
+			return
+		end
+		task.spawn(function()
+			local reqs, e1 = httpReq("GET", "/requests", nil, Access.ownerKey)
+			local grants, e2 = httpReq("GET", "/grants", nil, Access.ownerKey)
+			if not reqs or not grants then
+				setPending("Error: " .. tostring(e1 or e2))
+				return
+			end
+			setPending(#reqs)
+			setGrantCount(#grants)
+			clearGroup(gReq)
+			if #reqs == 0 then
+				emptyRow(gReq, "No pending requests")
+			end
+			for _, q in ipairs(reqs) do
+				requestCard(q)
+			end
+			clearGroup(gAct)
+			if #grants == 0 then
+				emptyRow(gAct, "Nobody has access yet")
+			end
+			for _, gr in ipairs(grants) do
+				grantRow(gr)
+			end
+		end)
+	end
+
+	emptyRow(gReq, "Enter your owner key below, then refresh")
+	emptyRow(gAct, "Nobody has access yet")
+
+	local gTools = COMP.Group(page, "Manage")
+	local keyIn = COMP.Input(gTools, {
+		text = "Owner key",
+		desc = "Stored on this PC only. Needed to approve people.",
+		placeholder = "paste your owner key",
+		buttonText = "Save",
+		callback = function(text)
+			Access.ownerKey = text
+			Cfg.writeText("ownerkey", text)
+			toast("Owner key saved")
+			ownerRefresh()
 		end,
 	})
-
-	-- ---- appearance
-	local gTheme = COMP.Group(page, "Appearance")
-	local accentPicker, swatches, rainbowToggle
-	local rainbowConn
-	local function setRainbow(on)
-		if rainbowConn then
-			rainbowConn:Disconnect()
-			rainbowConn = nil
-		end
-		Theme.values.rainbow = on
-		if on then
-			local acc = 0
-			rainbowConn = RunService.Heartbeat:Connect(function(dt)
-				acc += dt
-				if acc < 0.05 then
+	keyIn.Box.Text = Access.ownerKey
+	COMP.Button(gTools, {
+		text = "Refresh",
+		desc = "Reloads requests and active access",
+		buttonText = "Refresh",
+		callback = function()
+			ownerRefresh()
+		end,
+	})
+	local grantDur = COMP.Dropdown(gTools, {
+		text = "Grant duration",
+		options = DUR_NAMES,
+		default = "7 days",
+	})
+	COMP.Input(gTools, {
+		text = "Grant by username",
+		desc = "Gives someone access without a request",
+		placeholder = "roblox username",
+		buttonText = "Grant",
+		callback = function(name)
+			task.spawn(function()
+				local ok, uid = pcall(function()
+					return Players:GetUserIdFromNameAsync(name)
+				end)
+				if not ok then
+					toast("User not found", name)
 					return
 				end
-				acc = 0
-				Theme.apply({ accent = Color3.fromHSV((os.clock() * 0.08) % 1, 0.55, 1), preset = "Custom" }, true)
+				local secs
+				for _, dur in ipairs(DURATIONS) do
+					if dur[1] == grantDur.Get() then
+						secs = dur[2]
+					end
+				end
+				ownerCall("/grant", { userId = uid, username = name, seconds = secs }, "Access granted to " .. name)
 			end)
+		end,
+	})
+
+	task.spawn(function()
+		task.wait(1)
+		ownerRefresh()
+	end)
+end
+
+--========================================================================
+-- AIM  (camlock: pickable key, hold or toggle, players / NPCs)
+-- Only runs for approved users (Access.has()).
+--========================================================================
+local Aim = {
+	s = {
+		camlock = false,
+		mode = "Hold", -- Hold / Toggle
+		bindKind = "mouse", -- "mouse" or "key"
+		bindName = "MouseButton2",
+		targets = "Players", -- Players / NPCs / Both
+		teamCheck = true,
+		wallCheck = false,
+		part = "Head",
+		smooth = 5,
+		fov = 150,
+		showFov = true,
+		fovColor = rgb(255, 255, 255),
+		prediction = 0,
+	},
+	locked = nil,
+	held = false,
+	toggled = false,
+	npcs = {}, -- model -> humanoid
+}
+
+do
+	local s = Aim.s
+
+	local fovLayer = new("Frame", {
+		Name = "AimFov",
+		BackgroundTransparency = 1,
+		BorderSizePixel = 0,
+		Size = UDim2.fromScale(1, 1),
+		ZIndex = 0,
+		Visible = false,
+	}, gui)
+	local fovCircle = frame({
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		BackgroundTransparency = 1,
+		Size = UDim2.fromOffset(300, 300),
+	}, fovLayer)
+	corner(fovCircle, 9999)
+	local fovStroke = stroke(fovCircle, 0.3, C.white, 1.5)
+
+	local rayParams = RaycastParams.new()
+	rayParams.FilterType = Enum.RaycastFilterType.Exclude
+
+	-- ---- NPC tracking (humanoid models that aren't players)
+	local npcOn = false
+	local npcAdd, npcRem
+	local function trackNpc(hum)
+		local m = hum.Parent
+		if m and m:IsA("Model") and m ~= LocalPlayer.Character and not Players:GetPlayerFromCharacter(m) then
+			Aim.npcs[m] = hum
 		end
+	end
+	local function setNpcTracking(on)
+		if on == npcOn then
+			return
+		end
+		npcOn = on
+		if npcAdd then
+			npcAdd:Disconnect()
+			npcAdd = nil
+		end
+		if npcRem then
+			npcRem:Disconnect()
+			npcRem = nil
+		end
+		if on then
+			npcAdd = Workspace.DescendantAdded:Connect(function(d)
+				if d:IsA("Humanoid") then
+					task.defer(trackNpc, d)
+				end
+			end)
+			npcRem = Workspace.DescendantRemoving:Connect(function(d)
+				if d:IsA("Humanoid") and d.Parent then
+					Aim.npcs[d.Parent] = nil
+				end
+			end)
+			task.spawn(function()
+				local list = Workspace:GetDescendants()
+				for i, d in ipairs(list) do
+					if not npcOn then
+						return
+					end
+					if d:IsA("Humanoid") then
+						trackNpc(d)
+					end
+					if i % 500 == 0 then
+						task.wait()
+					end
+				end
+			end)
+		else
+			Aim.npcs = {}
+		end
+	end
+
+	-- ---- targeting
+	local function isEnemy(plr)
+		if plr == LocalPlayer then
+			return false
+		end
+		if s.teamCheck and plr.Team ~= nil and plr.Team == LocalPlayer.Team then
+			return false
+		end
+		return true
+	end
+
+	local function isAlive(char)
+		local hum = char and char:FindFirstChildOfClass("Humanoid")
+		return hum ~= nil and hum.Health > 0 and char:FindFirstChildOfClass("ForceField") == nil
+	end
+
+	local function eachTarget(fn)
+		if s.targets ~= "NPCs" then
+			for _, plr in ipairs(Players:GetPlayers()) do
+				if plr.Character and isEnemy(plr) then
+					fn(plr.Character)
+				end
+			end
+		end
+		if s.targets ~= "Players" then
+			for model, hum in pairs(Aim.npcs) do
+				if model.Parent and hum.Parent == model then
+					fn(model)
+				else
+					Aim.npcs[model] = nil
+				end
+			end
+		end
+	end
+
+	local function pick(char, names)
+		for _, n in ipairs(names) do
+			local p = char:FindFirstChild(n)
+			if p and p:IsA("BasePart") then
+				return p
+			end
+		end
+		return nil
+	end
+
+	local function aimPart(char, cam, mouse)
+		local p = s.part
+		if p == "Head" then
+			return pick(char, { "Head", "HumanoidRootPart", "UpperTorso", "Torso" }) or char.PrimaryPart
+		elseif p == "Torso" then
+			return pick(char, { "UpperTorso", "Torso", "HumanoidRootPart", "Head" }) or char.PrimaryPart
+		elseif p == "Root" then
+			return pick(char, { "HumanoidRootPart", "Torso", "UpperTorso", "Head" }) or char.PrimaryPart
+		end
+		-- "Closest": whichever body part is nearest the cursor
+		local best, bestD
+		for _, n in ipairs({ "Head", "UpperTorso", "Torso", "HumanoidRootPart" }) do
+			local part = char:FindFirstChild(n)
+			if part and part:IsA("BasePart") then
+				local sp = cam:WorldToViewportPoint(part.Position)
+				local d = (Vector2.new(sp.X, sp.Y) - mouse).Magnitude
+				if not bestD or d < bestD then
+					best, bestD = part, d
+				end
+			end
+		end
+		return best or char.PrimaryPart
+	end
+
+	local function lineOfSight(cam, part, char)
+		local filter = { char }
+		if LocalPlayer.Character then
+			filter[2] = LocalPlayer.Character
+		end
+		rayParams.FilterDescendantsInstances = filter
+		local o = cam.CFrame.Position
+		return Workspace:Raycast(o, part.Position - o, rayParams) == nil
+	end
+
+	local function findTarget(cam)
+		local mouse = UserInputService:GetMouseLocation()
+		local best, bestD = nil, s.fov
+		eachTarget(function(char)
+			if not isAlive(char) then
+				return
+			end
+			local part = aimPart(char, cam, mouse)
+			if not part then
+				return
+			end
+			local sp = cam:WorldToViewportPoint(part.Position)
+			if sp.Z <= 0 then
+				return
+			end
+			local d = (Vector2.new(sp.X, sp.Y) - mouse).Magnitude
+			if d < bestD and (not s.wallCheck or lineOfSight(cam, part, char)) then
+				best, bestD = part, d
+			end
+		end)
+		return best
+	end
+
+	-- ---- aim key (keyboard key or mouse button), hold or toggle
+	local function matches(input)
+		if s.bindKind == "mouse" then
+			return input.UserInputType.Name == s.bindName
+		end
+		return input.UserInputType == Enum.UserInputType.Keyboard and input.KeyCode.Name == s.bindName
+	end
+	bindConn(UserInputService.InputBegan, function(input, gp)
+		if not matches(input) or state.listening then
+			return
+		end
+		if s.bindKind == "key" and UserInputService:GetFocusedTextBox() then
+			return
+		end
+		if s.bindKind == "mouse" and gp then
+			return
+		end
+		if s.mode == "Toggle" then
+			Aim.toggled = not Aim.toggled
+			if not Aim.toggled then
+				Aim.locked = nil
+			end
+		else
+			Aim.held = true
+		end
+	end)
+	bindConn(UserInputService.InputEnded, function(input)
+		if matches(input) then
+			Aim.held = false
+		end
+	end)
+
+	function Aim.reset()
+		Aim.held, Aim.toggled, Aim.locked = false, false, nil
+	end
+
+	local function step(dt)
+		local allowed = Access.has() and s.camlock
+		local circle = allowed and s.showFov
+		fovLayer.Visible = circle
+		if circle then
+			local m = UserInputService:GetMouseLocation()
+			fovCircle.Position = UDim2.fromOffset(m.X, m.Y)
+			fovCircle.Size = UDim2.fromOffset(s.fov * 2, s.fov * 2)
+			fovStroke.Color = s.fovColor
+		end
+		setNpcTracking(allowed and s.targets ~= "Players")
+		local cam = Workspace.CurrentCamera
+		local active = (s.mode == "Toggle") and Aim.toggled or (s.mode ~= "Toggle" and Aim.held)
+		if not (allowed and cam and active) then
+			Aim.locked = nil
+			return
+		end
+		local t = Aim.locked
+		if not (t and t.Parent and isAlive(t.Parent)) then
+			t = findTarget(cam)
+			Aim.locked = t
+		end
+		if t then
+			local goal = CFrame.lookAt(cam.CFrame.Position, t.Position + t.AssemblyLinearVelocity * s.prediction)
+			local alpha = s.smooth <= 1 and 1 or (1 - (1 - 1 / s.smooth) ^ (dt * 60))
+			cam.CFrame = cam.CFrame:Lerp(goal, alpha)
+		end
+	end
+
+	-- after the camera script, so our camera change is the one that gets drawn
+	RunService:BindToRenderStep("KevinwareAim", Enum.RenderPriority.Camera.Value + 1, function(dt)
+		pcall(step, dt)
+	end)
+	onUnload(function()
+		pcall(function()
+			RunService:UnbindFromRenderStep("KevinwareAim")
+		end)
+		setNpcTracking(false)
+		fovLayer.Visible = false
+	end)
+end
+
+do
+	local page = Tabs.Aim.Content
+	local s = Aim.s
+	local function gated(g)
+		table.insert(Access.gated, g.box.Parent)
+		g.box.Parent.Visible = Access.has()
+		return g
+	end
+	local function prettyBind()
+		if s.bindKind == "mouse" then
+			return ({ MouseButton1 = "Left Mouse", MouseButton2 = "Right Mouse", MouseButton3 = "Middle Mouse" })[s.bindName]
+				or s.bindName
+		end
+		return (s.bindName:gsub("(%l)(%u)", "%1 %2"))
+	end
+
+	local gCam = gated(COMP.Group(page, "Camlock"))
+	COMP.Toggle(gCam, {
+		key = "aim.camlock",
+		text = "Camlock",
+		desc = "Pulls your camera onto the closest target inside the FOV",
+		default = false,
+		callback = function(on)
+			s.camlock = on
+			Aim.reset()
+		end,
+	})
+
+	-- aim key: click, then press any key or mouse button (Backspace = Right Mouse)
+	local bindBtn
+	do
+		local r = newRow(gCam, 60)
+		rowLabel(r, "Aim key", "Click, then press any key or mouse button", 0.55)
+		bindBtn = makeButton(r, prettyBind(), "ghost", 140, 32, {
+			AnchorPoint = Vector2.new(1, 0.5),
+			Position = UDim2.new(1, -16, 0.5, 0),
+		})
+		bindBtn.Button.MouseButton1Click:Connect(function()
+			if state.listening then
+				return
+			end
+			state.listening = true
+			bindBtn.SetText("Press a key...")
+			local conn
+			conn = UserInputService.InputBegan:Connect(function(input)
+				local t = input.UserInputType
+				local kind, name
+				if t == Enum.UserInputType.Keyboard then
+					if input.KeyCode == Enum.KeyCode.Escape then
+						conn:Disconnect()
+						task.delay(0.1, function()
+							state.listening = false
+						end)
+						bindBtn.SetText(prettyBind())
+						return
+					end
+					if input.KeyCode == Enum.KeyCode.Backspace then
+						kind, name = "mouse", "MouseButton2"
+					else
+						kind, name = "key", input.KeyCode.Name
+					end
+				elseif t == Enum.UserInputType.MouseButton1 or t == Enum.UserInputType.MouseButton2 or t == Enum.UserInputType.MouseButton3 then
+					kind, name = "mouse", t.Name
+				else
+					return
+				end
+				conn:Disconnect()
+				task.delay(0.1, function()
+					state.listening = false
+				end)
+				s.bindKind, s.bindName = kind, name
+				Aim.reset()
+				bindBtn.SetText(prettyBind())
+				Cfg.dirty()
+			end)
+		end)
+		Cfg.add("aim.bind", function()
+			return s.bindKind .. ":" .. s.bindName
+		end, function(v)
+			local kind, name = tostring(v):match("^(%a+):(.+)$")
+			if (kind == "mouse" or kind == "key") and name then
+				s.bindKind, s.bindName = kind, name
+				bindBtn.SetText(prettyBind())
+			end
+		end)
+	end
+
+	COMP.Dropdown(gCam, {
+		key = "aim.mode",
+		text = "Key mode",
+		options = { "Hold", "Toggle" },
+		default = s.mode,
+		callback = function(v)
+			s.mode = v
+			Aim.reset()
+		end,
+	})
+	COMP.Dropdown(gCam, {
+		key = "aim.targets",
+		text = "Targets",
+		options = { "Players", "NPCs", "Both" },
+		default = s.targets,
+		callback = function(v)
+			s.targets = v
+			Aim.locked = nil
+		end,
+	})
+	COMP.Dropdown(gCam, {
+		key = "aim.part",
+		text = "Aim part",
+		options = { "Head", "Torso", "Root", "Closest" },
+		default = s.part,
+		callback = function(v)
+			s.part = v
+		end,
+	})
+	COMP.Slider(gCam, {
+		key = "aim.smooth",
+		text = "Smoothness",
+		min = 1,
+		max = 20,
+		step = 1,
+		default = s.smooth,
+		format = function(v)
+			return v <= 1 and "Instant" or tostring(math.floor(v + 0.5))
+		end,
+		callback = function(v)
+			s.smooth = v
+		end,
+	})
+	COMP.Slider(gCam, {
+		key = "aim.prediction",
+		text = "Prediction",
+		min = 0,
+		max = 0.3,
+		step = 0.01,
+		default = s.prediction,
+		callback = function(v)
+			s.prediction = v
+		end,
+	})
+
+	local gTgt = gated(COMP.Group(page, "Targeting"))
+	COMP.Toggle(gTgt, {
+		key = "aim.team",
+		text = "Team check",
+		desc = "Ignore players on your team (NPCs have no team)",
+		default = s.teamCheck,
+		callback = function(on)
+			s.teamCheck = on
+		end,
+	})
+	COMP.Toggle(gTgt, {
+		key = "aim.wall",
+		text = "Wall check",
+		desc = "Ignore targets you can't see",
+		default = s.wallCheck,
+		callback = function(on)
+			s.wallCheck = on
+		end,
+	})
+	COMP.Slider(gTgt, {
+		key = "aim.fov",
+		text = "FOV",
+		min = 20,
+		max = 600,
+		step = 5,
+		default = s.fov,
+		suffix = " px",
+		callback = function(v)
+			s.fov = v
+		end,
+	})
+	COMP.Toggle(gTgt, {
+		key = "aim.showfov",
+		text = "Show FOV circle",
+		default = s.showFov,
+		callback = function(on)
+			s.showFov = on
+		end,
+	})
+	COMP.ColorPicker(gTgt, {
+		key = "aim.fovcolor",
+		text = "FOV color",
+		default = s.fovColor,
+		callback = function(c)
+			s.fovColor = c
+		end,
+	})
+end
+Access.fire()
+
+--========================================================================
+-- CUSTOM MACROS  (record key presses, edit delay / hold, speed, repeats, hotkey)
+--========================================================================
+local Macros = { list = {}, sel = nil, recording = nil, playing = {}, open = {}, recLast = nil }
+
+do
+	local HttpService = game:GetService("HttpService")
+	local VIM = game:GetService("VirtualInputManager")
+	local page = Tabs.Macros.Content
+	local editorOpen = false
+
+	local function typing()
+		return UserInputService:GetFocusedTextBox() ~= nil
+	end
+	local function pretty(ev)
+		if ev.kind == "mouse" then
+			return ({ MouseButton1 = "Left click", MouseButton2 = "Right click", MouseButton3 = "Middle click" })[ev.k]
+				or tostring(ev.k)
+		end
+		return (tostring(ev.k):gsub("(%l)(%u)", "%1 %2"))
+	end
+	local function press(ev, down)
+		Macros.lastSynth = os.clock()
+		pcall(function()
+			if ev.kind == "mouse" then
+				local btn = ev.k == "MouseButton1" and 0 or (ev.k == "MouseButton2" and 1 or 2)
+				local p = UserInputService:GetMouseLocation()
+				VIM:SendMouseButtonEvent(p.X, p.Y, btn, down, game, 1)
+			else
+				local kc = Enum.KeyCode[tostring(ev.k)]
+				if kc then
+					VIM:SendKeyEvent(down, kc, false, game)
+				end
+			end
+		end)
+	end
+
+	local refreshList, refreshEditor, refreshEvents, selectMacro, startRec, stopRec
+
+	-- ---------------------------------------------------------- playback
+	function Macros.stop(m)
+		local t = Macros.playing[m]
+		if t then
+			t.cancel = true
+		end
+	end
+	function Macros.play(m)
+		if Macros.playing[m] or #m.events == 0 then
+			return
+		end
+		local token = { cancel = false }
+		Macros.playing[m] = token
+		task.spawn(function()
+			local speed = math.max(tonumber(m.speed) or 1, 0.05)
+			repeat
+				for _, ev in ipairs(m.events) do
+					if token.cancel then
+						break
+					end
+					task.wait(math.max(tonumber(ev.delay) or 0, 0) / 1000 / speed)
+					if token.cancel then
+						break
+					end
+					task.spawn(function()
+						press(ev, true)
+						task.wait(math.max(tonumber(ev.hold) or 50, 10) / 1000 / speed)
+						press(ev, false)
+					end)
+				end
+				local last = m.events[#m.events]
+				if last and not token.cancel then
+					task.wait((math.max(tonumber(last.hold) or 50, 10) / 1000 / speed) + 0.02)
+				end
+				if m.mode == "repeat" and not token.cancel and (tonumber(m.gap) or 0) > 0 then
+					task.wait(m.gap / 1000)
+				end
+			until token.cancel or m.mode ~= "repeat"
+			Macros.playing[m] = nil
+			refreshList()
+			refreshEditor()
+		end)
+		refreshList()
+		refreshEditor()
 	end
 	onUnload(function()
-		if rainbowConn then
-			rainbowConn:Disconnect()
+		Macros.recording = nil
+		for _, t in pairs(Macros.playing) do
+			t.cancel = true
 		end
 	end)
 
-	local items = {}
-	for _, p in ipairs(PRESETS) do
-		table.insert(items, { name = p.name, color1 = p.accent, color2 = p.panelBot })
+	-- ------------------------------------------------------------- layout
+	local mainWraps = {}
+	for _, c in ipairs(page:GetChildren()) do
+		if c:IsA("Frame") then
+			table.insert(mainWraps, c)
+		end
 	end
-	swatches = COMP.Swatches(gTheme, {
-		key = "theme.preset",
-		text = "Theme",
-		items = items,
-		default = "Glass",
-		callback = function(name)
-			if rainbowToggle and rainbowToggle.Get() then
-				rainbowToggle.Set(false, true)
-				setRainbow(false)
-			end
-			Theme.setPreset(name)
-			if accentPicker then
-				accentPicker.Set(Theme.values.accent, true)
-			end
+	local gEntry = COMP.Group(page, "Custom macros")
+	table.insert(mainWraps, gEntry.box.Parent)
+	local gBack = COMP.Group(page, nil)
+	local gList = COMP.Group(page, "Your macros")
+	local gEdit = COMP.Group(page, "Macro editor")
+	local gEvents = COMP.Group(page, "Keys")
+	local listWraps = { gBack.box.Parent, gList.box.Parent }
+	local selWraps = { gEdit.box.Parent, gEvents.box.Parent }
+
+	local function layout()
+		for _, w in ipairs(mainWraps) do
+			w.Visible = not editorOpen
+		end
+		for _, w in ipairs(listWraps) do
+			w.Visible = editorOpen
+		end
+		for _, w in ipairs(selWraps) do
+			w.Visible = editorOpen and Macros.sel ~= nil
+		end
+	end
+	local function showEditor(on)
+		editorOpen = on
+		layout()
+		page.CanvasPosition = Vector2.new(0, 0)
+	end
+
+	COMP.Button(gEntry, {
+		text = "Custom macros",
+		desc = "Record your own key sequences",
+		buttonText = "Open",
+		callback = function()
+			showEditor(true)
 		end,
 	})
-	accentPicker = COMP.ColorPicker(gTheme, {
-		key = "theme.accent",
-		skip = function()
-			return Theme.values.preset ~= "Custom"
-		end,
-		text = "Accent color",
-		default = Theme.values.accent,
-		callback = function(c)
-			if rainbowToggle and rainbowToggle.Get() then
-				rainbowToggle.Set(false, true)
-				setRainbow(false)
-			end
-			Theme.apply({ accent = c, preset = "Custom" })
-			swatches.Set(nil)
-		end,
-	})
-	rainbowToggle = COMP.Toggle(gTheme, {
-		key = "theme.rainbow",
-		text = "Rainbow accent",
-		desc = "Cycles the accent colour",
-		callback = setRainbow,
-	})
-	COMP.Slider(gTheme, {
-		key = "theme.opacity",
-		text = "Glass opacity",
-		min = 50,
-		max = 100,
-		step = 1,
-		default = math.floor((1 - Theme.values.alpha) * 100 + 0.5),
-		suffix = "%",
-		callback = function(v)
-			Theme.apply({ alpha = 1 - v / 100 })
+	COMP.Button(gBack, {
+		text = "Back",
+		desc = "Return to the other macros",
+		buttonText = "Back",
+		callback = function()
+			showEditor(false)
 		end,
 	})
 
-	-- ---- effects
-	local gFx = COMP.Group(page, "Effects")
-	COMP.Toggle(gFx, {
-		key = "fx.snow",
-		text = "Snow",
-		desc = "Falling snow over the screen while the UI is open",
-		callback = function(on)
-			Snow.enabled = on
-			Snow.refresh()
+	-- ------------------------------------------------------------ editor
+	local nameIn = COMP.Input(gEdit, {
+		text = "Name",
+		placeholder = "macro name",
+		buttonText = "Rename",
+		callback = function(t)
+			local m = Macros.sel
+			if m and t ~= "" then
+				m.name = t
+				Cfg.dirty()
+				refreshList()
+			end
 		end,
 	})
-	COMP.Slider(gFx, {
-		key = "fx.snowAmount",
-		text = "Snow amount",
-		min = 10,
-		max = 100,
-		step = 5,
-		default = 50,
-		suffix = "%",
-		callback = function(v)
-			Snow.amount = v / 100
-			Snow.build(math.floor(Snow.max * Snow.amount + 0.5))
+
+	local hkBtn
+	do
+		local r = newRow(gEdit, 60)
+		rowLabel(r, "Hotkey", "Press it to play or stop. Backspace clears", 0.55)
+		hkBtn = makeButton(r, "None", "ghost", 130, 32, {
+			AnchorPoint = Vector2.new(1, 0.5),
+			Position = UDim2.new(1, -16, 0.5, 0),
+		})
+		hkBtn.Button.MouseButton1Click:Connect(function()
+			local m = Macros.sel
+			if not m or state.listening then
+				return
+			end
+			state.listening = true
+			hkBtn.SetText("Press a key...")
+			local conn
+			conn = UserInputService.InputBegan:Connect(function(input)
+				if input.UserInputType ~= Enum.UserInputType.Keyboard then
+					return
+				end
+				conn:Disconnect()
+				task.delay(0.1, function()
+					state.listening = false
+				end)
+				if input.KeyCode == Enum.KeyCode.Backspace then
+					m.hotkey = nil
+				elseif input.KeyCode ~= Enum.KeyCode.Escape then
+					m.hotkey = input.KeyCode.Name
+				end
+				Cfg.dirty()
+				refreshEditor()
+				refreshList()
+			end)
+		end)
+	end
+
+	local recRow = COMP.Button(gEdit, {
+		text = "Record",
+		desc = "Press keys in the game, then press Stop",
+		buttonText = "Record",
+		style = "primary",
+		callback = function()
+			local m = Macros.sel
+			if not m then
+				return
+			end
+			if Macros.recording then
+				stopRec()
+			else
+				startRec(m)
+			end
 		end,
 	})
-	COMP.Slider(gFx, {
-		key = "fx.snowSpeed",
-		text = "Snow speed",
-		min = 0.3,
-		max = 3,
-		step = 0.1,
+	local playRow = COMP.Button(gEdit, {
+		text = "Play",
+		buttonText = "Play",
+		style = "primary",
+		callback = function()
+			local m = Macros.sel
+			if not m then
+				return
+			end
+			if Macros.playing[m] then
+				Macros.stop(m)
+			else
+				Macros.play(m)
+			end
+		end,
+	})
+	local speedS = COMP.Slider(gEdit, {
+		text = "Speed",
+		min = 0.25,
+		max = 4,
+		step = 0.05,
 		default = 1,
 		suffix = "x",
 		callback = function(v)
-			Snow.speed = v
+			if Macros.sel then
+				Macros.sel.speed = v
+				Cfg.dirty()
+			end
 		end,
 	})
-
-	-- ---- interface
-	local gUi = COMP.Group(page, "Interface")
-	COMP.Keybind(gUi, {
-		key = "ui.key",
-		text = "Toggle key",
-		default = CONFIG.ToggleKey,
-		callback = function(key)
-			CONFIG.ToggleKey = key
-		end,
-	})
-	COMP.Slider(gUi, {
-		key = "ui.scale",
-		text = "UI scale",
-		min = 80,
-		max = 130,
-		step = 5,
-		default = 100,
-		suffix = "%",
+	local modeD = COMP.Dropdown(gEdit, {
+		text = "Mode",
+		options = { "Do once", "Repeat" },
+		default = "Do once",
 		callback = function(v)
-			setUiScale(v / 100)
-		end,
-	})
-
-	-- ---- config
-	local gCfg = COMP.Group(page, "Config")
-	local importInput
-	autoToggle = COMP.Toggle(gCfg, {
-		text = "Auto config",
-		desc = "Saves your settings and loads them every time you execute",
-		default = false,
-		callback = function(on)
-			if on and not Cfg.canFile() then
-				toast("Auto config unavailable", "Your executor can't read or write files.", 3.5)
-				autoToggle.Set(false, true)
-				return
-			end
-			Cfg.auto = on
-			Cfg.saveFile()
-			toast(on and "Auto config on" or "Auto config off", on and "Settings save automatically." or nil)
-		end,
-	})
-	COMP.Button(gCfg, {
-		text = "Copy config",
-		desc = "Copies a code with all your settings",
-		buttonText = "Copy",
-		callback = function()
-			local code = Cfg.encode()
-			if Cfg.copy(code) then
-				toast("Config copied", "Paste the code anywhere to share it.")
-			else
-				importInput.Box.Text = code
-				toast("Clipboard unavailable", "The code is in the box below, copy it from there.", 4)
+			if Macros.sel then
+				Macros.sel.mode = v == "Repeat" and "repeat" or "once"
+				Cfg.dirty()
+				refreshList()
 			end
 		end,
 	})
-	importInput = COMP.Input(gCfg, {
-		text = "Import config",
-		desc = "Paste a config code (starts with KW1:)",
-		placeholder = "KW1:...",
-		buttonText = "Import",
-		callback = function(text)
-			local data = Cfg.decode(text)
-			if not data then
-				toast("Invalid config code", "A config code starts with KW1:")
-				return
+	local gapS = COMP.Slider(gEdit, {
+		text = "Gap between repeats",
+		min = 0,
+		max = 2000,
+		step = 50,
+		default = 0,
+		suffix = " ms",
+		callback = function(v)
+			if Macros.sel then
+				Macros.sel.gap = v
+				Cfg.dirty()
 			end
-			local n = Cfg.apply(data)
-			Cfg.dirty()
-			toast("Config imported", n .. " settings applied")
 		end,
 	})
 
-	-- ---- script
-	local gScript = COMP.Group(page, "Script")
-	local armed = false
-	COMP.Button(gScript, {
-		text = "Unload script",
-		desc = "Restores your game and removes the UI",
-		buttonText = "Unload",
-		style = "danger",
-		callback = function(btn)
-			if armed then
-				armed = false
-				doUnload()
-				return
-			end
-			armed = true
-			btn.SetText("Confirm")
-			task.delay(3, function()
-				if armed then
-					armed = false
-					btn.SetText("Unload")
-				end
-			end)
-		end,
-	})
-end
-
---========================================================================
--- ENVIRONMENT PAGE
---========================================================================
-do
-	local page = Tabs.Environment.Content
-
-	local function clockText(v)
-		local h = math.floor(v)
-		local m = math.floor((v - h) * 60 + 0.5)
-		if m == 60 then
-			h += 1
-			m = 0
+	function startRec(m)
+		m.events = {}
+		Macros.recording = m
+		Macros.open = {}
+		Macros.recLast = nil
+		recRow.Button.SetText("Stop")
+		recRow.Button.SetStyle("danger")
+		toast("Recording", "Press the keys you want, then click Stop.", 3)
+		refreshEvents()
+	end
+	function stopRec()
+		local m = Macros.recording
+		Macros.recording = nil
+		Macros.open = {}
+		recRow.Button.SetText("Record")
+		recRow.Button.SetStyle("primary")
+		Cfg.dirty()
+		if m then
+			toast("Recorded " .. #m.events .. " keys", "Edit the delays and holds below.")
 		end
-		return string.format("%02d:%02d", h % 24, m)
+		refreshEvents()
+		refreshList()
 	end
 
-	-- ---- time of day
-	local gTime = COMP.Group(page, "Time of day")
-	Env.ui.time = COMP.Segmented(gTime, {
-		key = "env.preset",
-		noReset = true,
-		text = "Preset",
-		options = TIME_NAMES,
-		default = false,
-		callback = function(name)
-			local p = TIMES[name].light
-			Env.timePreset(name)
-			Env.ui.timeSlider.Set(p.ClockTime, true)
-			Env.ui.brightness.Set(p.Brightness, true)
-			Env.ui.exposure.Set(p.ExposureCompensation, true)
-			Env.ui.ambient.Set(p.OutdoorAmbient, true)
-		end,
-	})
-	Env.ui.timeSlider = COMP.Slider(gTime, {
-		key = "env.time",
-		noReset = true,
-		text = "Time",
-		min = 0,
-		max = 24,
-		step = 0.1,
-		default = Lighting.ClockTime % 24,
-		format = clockText,
-		callback = function(v)
-			Env.set({ ClockTime = v })
-			Env.useDefaultSky()
-			Env.syncAll()
-			Env.ui.time.Clear()
-		end,
-	})
-	COMP.Toggle(gTime, {
-		key = "env.lock",
-		noReset = true,
-		text = "Lock environment",
-		desc = "Keeps your settings when the game tries to change them",
-		default = true,
-		callback = function(on)
-			Env.lock = on
-		end,
-	})
-	COMP.Toggle(gTime, {
-		key = "env.override",
-		noReset = true,
-		text = "Override game visuals",
-		desc = "Presets replace the game's own skybox, atmosphere and color grading",
-		default = true,
-		callback = function(on)
-			Env.setOverride(on)
-		end,
-	})
-
-	-- ---- sky
-	local gSky = COMP.Group(page, "Sky")
-	Env.ui.sky = COMP.Dropdown(gSky, {
-		key = "env.sky",
-		noReset = true,
-		text = "Sky theme",
-		options = SKY_NAMES,
-		default = "Game default",
-		callback = function(name)
-			Env.skyTheme(name)
-		end,
-	})
-	COMP.Input(gSky, {
-		text = "Custom skybox",
-		desc = "1 asset ID for all faces, or 6 (Bk Dn Ft Lf Rt Up)",
-		placeholder = "IDs separated by spaces or commas",
-		buttonText = "Apply",
-		callback = function(text)
-			if Env.customSky(text) then
-				toast("Skybox applied")
-			else
-				toast("Invalid IDs", "Paste 1 or 6 numeric asset IDs.")
+	-- ------------------------------------------------------- key events
+	function refreshEvents()
+		clearGroup(gEvents)
+		local m = Macros.sel
+		if not m then
+			return
+		end
+		local head = newRow(gEvents, 56)
+		rowLabel(head, #m.events .. " keys", "Delay = wait before the key, Hold = how long it stays down", 0.8)
+		local clr = makeButton(head, "Clear", "ghost", 76, 30, {
+			AnchorPoint = Vector2.new(1, 0.5),
+			Position = UDim2.new(1, -16, 0.5, 0),
+		})
+		clr.Button.MouseButton1Click:Connect(function()
+			m.events = {}
+			Cfg.dirty()
+			refreshEvents()
+			refreshList()
+		end)
+		for i, ev in ipairs(m.events) do
+			if i > 150 then
+				break
 			end
-		end,
-	})
-	local cloudsNow = Env.getClouds(false)
-	COMP.Toggle(gSky, {
-		key = "env.clouds",
-		noReset = true,
-		text = "Clouds",
-		default = cloudsNow and cloudsNow.Enabled or false,
-		callback = function(on)
-			Env.clouds(on, nil)
-		end,
-	})
-	COMP.Slider(gSky, {
-		key = "env.cover",
-		noReset = true,
-		text = "Cloud cover",
-		min = 0,
-		max = 1,
-		step = 0.05,
-		default = cloudsNow and cloudsNow.Cover or 0.5,
-		callback = function(v)
-			Env.clouds(nil, v)
-		end,
-	})
-	COMP.Toggle(gSky, {
-		key = "env.domes",
-		noReset = true,
-		text = "Hide sky domes",
-		desc = "Hides fake sky meshes while presets are on",
-		default = false,
-		callback = function(on)
-			Env.hideDomes = on
-			Env.refreshDomes()
-		end,
-	})
-
-	-- ---- lighting
-	local gLight = COMP.Group(page, "Lighting")
-	Env.ui.brightness = COMP.Slider(gLight, {
-		key = "env.brightness",
-		noReset = true,
-		text = "Brightness",
-		min = 0,
-		max = 10,
-		step = 0.1,
-		default = math.clamp(Lighting.Brightness, 0, 10),
-		callback = function(v)
-			Env.set({ Brightness = v })
-		end,
-	})
-	Env.ui.exposure = COMP.Slider(gLight, {
-		key = "env.exposure",
-		noReset = true,
-		text = "Exposure",
-		min = -3,
-		max = 3,
-		step = 0.1,
-		default = math.clamp(Lighting.ExposureCompensation, -3, 3),
-		callback = function(v)
-			Env.set({ ExposureCompensation = v })
-		end,
-	})
-	Env.ui.ambient = COMP.ColorPicker(gLight, {
-		key = "env.ambient",
-		noReset = true,
-		text = "Ambient light",
-		default = Lighting.OutdoorAmbient,
-		callback = function(c)
-			Env.set({ Ambient = c, OutdoorAmbient = c })
-		end,
-	})
-	Env.ui.fog = COMP.Slider(gLight, {
-		key = "env.fog",
-		noReset = true,
-		text = "Fog distance",
-		min = 100,
-		max = 5000,
-		step = 50,
-		default = Lighting.FogEnd >= 5000 and 5000 or math.max(100, Lighting.FogEnd),
-		format = function(v)
-			if v >= 5000 then
-				return "Off"
+			local r = newRow(gEvents, 64)
+			label({
+				Text = i .. ".  " .. pretty(ev),
+				Position = UDim2.fromOffset(16, 0),
+				Size = UDim2.fromOffset(140, 64),
+				Font = Enum.Font.GothamSemibold,
+				TextTruncate = Enum.TextTruncate.AtEnd,
+			}, r)
+			local function field(x, caption, field, minV)
+				label({
+					Text = caption,
+					Position = UDim2.fromOffset(x, 8),
+					Size = UDim2.fromOffset(90, 12),
+					TextSize = 11,
+					TextColor3 = C.sub,
+				}, r)
+				local bf = frame({
+					Position = UDim2.fromOffset(x, 24),
+					Size = UDim2.fromOffset(90, 28),
+					BackgroundColor3 = C.black,
+					BackgroundTransparency = 0.6,
+				}, r)
+				corner(bf, 10)
+				stroke(bf, 0.9)
+				local tb = new("TextBox", {
+					BackgroundTransparency = 1,
+					BorderSizePixel = 0,
+					Position = UDim2.fromOffset(8, 0),
+					Size = UDim2.new(1, -16, 1, 0),
+					Text = tostring(ev[field]),
+					TextColor3 = C.white,
+					TextSize = 13,
+					Font = Enum.Font.GothamMedium,
+					TextXAlignment = Enum.TextXAlignment.Center,
+					ClearTextOnFocus = false,
+				}, bf)
+				tb.FocusLost:Connect(function()
+					local n = tonumber(tb.Text)
+					if n then
+						ev[field] = math.clamp(math.floor(n + 0.5), minV, 60000)
+						Cfg.dirty()
+					end
+					tb.Text = tostring(ev[field])
+				end)
 			end
-			return math.floor(v) .. " studs"
-		end,
-		callback = function(v)
-			if v >= 5000 then
-				Env.set({ FogEnd = 100000, FogStart = 0 })
-			else
-				Env.set({ FogEnd = v, FogStart = 0 })
-			end
-		end,
-	})
-	Env.ui.fogColor = COMP.ColorPicker(gLight, {
-		key = "env.fogColor",
-		noReset = true,
-		text = "Fog color",
-		default = Lighting.FogColor,
-		callback = function(c)
-			Env.set({ FogColor = c })
-		end,
-	})
+			field(170, "DELAY (ms)", "delay", 0)
+			field(272, "HOLD (ms)", "hold", 10)
+			local rm = makeButton(r, "Remove", "ghost", 76, 28, {
+				AnchorPoint = Vector2.new(1, 0.5),
+				Position = UDim2.new(1, -16, 0.5, 0),
+			})
+			rm.Button.MouseButton1Click:Connect(function()
+				table.remove(m.events, i)
+				Cfg.dirty()
+				refreshEvents()
+				refreshList()
+			end)
+		end
+	end
 
-	-- ---- reset
-	local gReset = COMP.Group(page, "Reset")
-	COMP.Button(gReset, {
-		text = "Reset environment",
-		desc = "Puts lighting, sky and clouds back to the game's own",
-		buttonText = "Reset",
-		callback = function()
-			Env.reset()
-			Env.ui.time.Clear()
-			Env.ui.timeSlider.Set(Lighting.ClockTime % 24, true)
-			Env.ui.sky.Set("Game default", true)
-			Env.ui.brightness.Set(math.clamp(Lighting.Brightness, 0, 10), true)
-			Env.ui.exposure.Set(math.clamp(Lighting.ExposureCompensation, -3, 3), true)
-			Env.ui.ambient.Set(Lighting.OutdoorAmbient, true)
-			Env.ui.fog.Set(Lighting.FogEnd >= 5000 and 5000 or math.max(100, Lighting.FogEnd), true)
-			Env.ui.fogColor.Set(Lighting.FogColor, true)
-			toast("Environment reset")
-		end,
-	})
+	function refreshEditor()
+		local m = Macros.sel
+		layout()
+		if not m then
+			return
+		end
+		nameIn.Box.Text = m.name
+		speedS.Set(tonumber(m.speed) or 1, true)
+		modeD.Set(m.mode == "repeat" and "Repeat" or "Do once", true)
+		gapS.Set(tonumber(m.gap) or 0, true)
+		hkBtn.SetText(m.hotkey and tostring(m.hotkey):gsub("(%l)(%u)", "%1 %2") or "None")
+		if Macros.playing[m] then
+			playRow.Button.SetText("Stop")
+			playRow.Button.SetStyle("danger")
+		else
+			playRow.Button.SetText("Play")
+			playRow.Button.SetStyle("primary")
+		end
+	end
+
+	function selectMacro(m)
+		Macros.sel = m
+		refreshEditor()
+		refreshEvents()
+		showEditor(true)
+	end
+
+	-- ------------------------------------------------------- macro list
+	function refreshList()
+		clearGroup(gList)
+		local r = newRow(gList, 60)
+		rowLabel(r, "New macro", "Creates an empty macro to record into", 0.6)
+		local nb = makeButton(r, "New", "primary", 80, 30, {
+			AnchorPoint = Vector2.new(1, 0.5),
+			Position = UDim2.new(1, -16, 0.5, 0),
+		})
+		nb.Button.MouseButton1Click:Connect(function()
+			local m = { name = "Macro " .. (#Macros.list + 1), speed = 1, mode = "once", gap = 0, events = {} }
+			table.insert(Macros.list, m)
+			Cfg.dirty()
+			selectMacro(m)
+			refreshList()
+		end)
+		for _, m in ipairs(Macros.list) do
+			local row = newRow(gList, 60)
+			label({
+				Text = m.name,
+				Position = UDim2.fromOffset(16, 11),
+				Size = UDim2.new(1, -200, 0, 18),
+				Font = Enum.Font.GothamSemibold,
+				TextTruncate = Enum.TextTruncate.AtEnd,
+			}, row)
+			label({
+				Text = #m.events .. " keys   " .. (m.mode == "repeat" and "repeat" or "once") .. "   " .. (tonumber(m.speed) or 1) .. "x" .. (m.hotkey and ("   [" .. tostring(m.hotkey) .. "]") or ""),
+				Position = UDim2.fromOffset(16, 31),
+				Size = UDim2.new(1, -200, 0, 14),
+				TextSize = 12,
+				TextColor3 = C.sub,
+				TextTruncate = Enum.TextTruncate.AtEnd,
+			}, row)
+			local playing = Macros.playing[m] ~= nil
+			local pb = makeButton(row, playing and "Stop" or "Play", playing and "danger" or "primary", 70, 30, {
+				AnchorPoint = Vector2.new(1, 0.5),
+				Position = UDim2.new(1, -16, 0.5, 0),
+			})
+			local eb = makeButton(row, "Edit", "ghost", 64, 30, {
+				AnchorPoint = Vector2.new(1, 0.5),
+				Position = UDim2.new(1, -94, 0.5, 0),
+			})
+			pb.Button.MouseButton1Click:Connect(function()
+				if Macros.playing[m] then
+					Macros.stop(m)
+				else
+					Macros.play(m)
+				end
+			end)
+			eb.Button.MouseButton1Click:Connect(function()
+				selectMacro(m)
+			end)
+		end
+	end
+
+	-- ----------------------------------------------- record + hotkeys
+	bindConn(UserInputService.InputBegan, function(input, gp)
+		local rec = Macros.recording
+		if rec then
+			if typing() then
+				return
+			end
+			local kind, k
+			local t = input.UserInputType
+			if t == Enum.UserInputType.Keyboard then
+				kind, k = "key", input.KeyCode.Name
+			elseif not gp and (t == Enum.UserInputType.MouseButton1 or t == Enum.UserInputType.MouseButton2 or t == Enum.UserInputType.MouseButton3) then
+				kind, k = "mouse", t.Name
+			end
+			if kind and k ~= "Unknown" and not Macros.open[k] then
+				local now = os.clock()
+				local ev = {
+					kind = kind,
+					k = k,
+					delay = Macros.recLast and math.floor((now - Macros.recLast) * 1000 + 0.5) or 0,
+					hold = 80,
+				}
+				Macros.recLast = now
+				table.insert(rec.events, ev)
+				Macros.open[k] = { ev = ev, t0 = now }
+			end
+			return
+		end
+		if typing() or state.listening or os.clock() - (Macros.lastSynth or 0) < 0.06 then
+			return
+		end
+		if input.UserInputType == Enum.UserInputType.Keyboard then
+			for _, m in ipairs(Macros.list) do
+				if m.hotkey and m.hotkey == input.KeyCode.Name then
+					if Macros.playing[m] then
+						Macros.stop(m)
+					else
+						Macros.play(m)
+					end
+				end
+			end
+		end
+	end)
+	bindConn(UserInputService.InputEnded, function(input)
+		if not Macros.recording then
+			return
+		end
+		local k = input.UserInputType == Enum.UserInputType.Keyboard and input.KeyCode.Name or input.UserInputType.Name
+		local o = Macros.open[k]
+		if o then
+			o.ev.hold = math.max(10, math.floor((os.clock() - o.t0) * 1000 + 0.5))
+			Macros.open[k] = nil
+		end
+	end)
+
+	-- ------------------------------------------------------- persistence
+	Cfg.add("macros.data", function()
+		return HttpService:JSONEncode(Macros.list)
+	end, function(str)
+		local ok, data = pcall(function()
+			return HttpService:JSONDecode(str)
+		end)
+		if not (ok and type(data) == "table") then
+			return
+		end
+		Macros.list = {}
+		for _, m in ipairs(data) do
+			if type(m) == "table" and type(m.events) == "table" then
+				table.insert(Macros.list, {
+					name = tostring(m.name or "Macro"),
+					speed = tonumber(m.speed) or 1,
+					mode = (m.mode == "repeat" or (m.mode == nil and (tonumber(m.loops) or 1) ~= 1)) and "repeat" or "once",
+					gap = tonumber(m.gap) or 0,
+					hotkey = type(m.hotkey) == "string" and m.hotkey or nil,
+					events = m.events,
+				})
+			end
+		end
+		Macros.sel = nil
+		refreshList()
+		refreshEditor()
+		refreshEvents()
+	end, { noReset = true })
+
+	layout()
+	refreshList()
 end
 
 --========================================================================
