@@ -2680,7 +2680,8 @@ function Perf.quality(level)
 		if Perf.origQuality == nil then
 			Perf.origQuality = r.QualityLevel
 		end
-		r.QualityLevel = level
+		local item = Enum.QualityLevel["Level" .. string.format("%02d", level)]
+		r.QualityLevel = item or level
 	end)
 end
 
@@ -2771,6 +2772,29 @@ local WORLD = {
 			d.Enabled = o
 		end,
 	},
+}
+-- models / meshes swap to simplified versions with distance; force full detail everywhere
+WORLD.lod = {
+	test = function(d)
+		return d:IsA("Model") or d:IsA("MeshPart")
+	end,
+	apply = function(d)
+		if d:IsA("Model") then
+			local o = d.LevelOfDetail
+			d.LevelOfDetail = Enum.ModelLevelOfDetail.Disabled
+			return o
+		end
+		local o = d.RenderFidelity
+		d.RenderFidelity = Enum.RenderFidelity.Precise
+		return o
+	end,
+	restore = function(d, o)
+		if d:IsA("Model") then
+			d.LevelOfDetail = o
+		else
+			d.RenderFidelity = o
+		end
+	end,
 }
 for name in pairs(WORLD) do
 	Perf.worldState[name] = { on = false, store = setmetatable({}, { __mode = "k" }) }
@@ -2898,13 +2922,165 @@ function Perf.clearMemory()
 	return before, Stats:GetTotalMemoryUsageMb()
 end
 
+-- "Graphics detail": lowers detail through individual effects instead of the engine quality
+-- level, because the engine level also cuts render distance.
+Perf.manual = {}
+Perf.level = 10
+local PROFILE = { shadows = 9, postfx = 8, particles = 7, terrain = 6, textures = 5, smooth = 4 }
+
+function Perf.meshDetail(low)
+	pcall(function()
+		local r = settings().Rendering
+		if low then
+			if Perf.origMesh == nil then
+				Perf.origMesh = r.MeshPartDetailLevel
+			end
+			r.MeshPartDetailLevel = Enum.MeshPartDetailLevel.Level04
+		elseif Perf.origMesh ~= nil then
+			r.MeshPartDetailLevel = Perf.origMesh
+			Perf.origMesh = nil
+		end
+	end)
+end
+
+Perf.keepDistance = true
+
+-- Roblox's engine quality level also sets how far it draws, so pin it to max while the
+-- detail effects above are lowered. Re-applied because Roblox / the game can reset it.
+function Perf.pinDistance(on)
+	Perf.pinned = on == true
+	pcall(function()
+		local r = settings().Rendering
+		if on then
+			if Perf.origQuality == nil then
+				Perf.origQuality = r.QualityLevel
+			end
+			r.QualityLevel = Enum.QualityLevel.Level21
+		elseif Perf.origQuality ~= nil then
+			r.QualityLevel = Perf.origQuality
+			Perf.origQuality = nil
+		end
+	end)
+end
+
+do
+	local acc = 0
+	bindConn(RunService.Heartbeat, function(dt)
+		if not Perf.pinned then
+			return
+		end
+		acc += dt
+		if acc >= 3 then
+			acc = 0
+			pcall(function()
+				local r = settings().Rendering
+				if r.QualityLevel ~= Enum.QualityLevel.Level21 then
+					r.QualityLevel = Enum.QualityLevel.Level21
+				end
+			end)
+		end
+	end)
+end
+
+-- fog and atmosphere haze make far objects fade out, which looks like a short render distance
+function Perf.clearFog(on)
+	Perf.fogOn = on == true
+	if on then
+		if not Perf.fogOrig then
+			Perf.fogOrig = { FogEnd = Lighting.FogEnd, FogStart = Lighting.FogStart, atmos = {} }
+		end
+		Lighting.FogEnd = 100000
+		for _, a in ipairs(Lighting:GetChildren()) do
+			if a:IsA("Atmosphere") then
+				if not Perf.fogOrig.atmos[a] then
+					Perf.fogOrig.atmos[a] = { Density = a.Density, Haze = a.Haze }
+				end
+				a.Density = 0
+				a.Haze = 0
+			end
+		end
+	elseif Perf.fogOrig then
+		local o = Perf.fogOrig
+		Perf.fogOrig = nil
+		pcall(function()
+			Lighting.FogEnd = o.FogEnd
+			Lighting.FogStart = o.FogStart
+			for a, v in pairs(o.atmos) do
+				if a.Parent then
+					a.Density = v.Density
+					a.Haze = v.Haze
+				end
+			end
+		end)
+	end
+end
+
+do
+	local acc = 0
+	bindConn(RunService.Heartbeat, function(dt)
+		if not Perf.fogOn then
+			return
+		end
+		acc += dt
+		if acc >= 1 then
+			acc = 0
+			pcall(Perf.clearFog, true)
+		end
+	end)
+end
+
+function Perf.reapply()
+	local function want(f)
+		return Perf.manual[f] == true or Perf.level <= PROFILE[f]
+	end
+	Perf.shadows(want("shadows"))
+	Perf.postfx(want("postfx"))
+	Perf.world("particles", want("particles"))
+	Perf.terrain(want("terrain"))
+	Perf.world("textures", want("textures"))
+	Perf.world("smooth", want("smooth"))
+end
+
+function Perf.setManual(feature, on)
+	Perf.manual[feature] = on
+	Perf.reapply()
+end
+
+function Perf.setLevel(level)
+	Perf.level = level
+	Perf.reapply()
+end
+
+-- the single "Graphics quality" slider (1-21):
+--   keep render distance ON : cut effects to match the level and hold the engine level at max
+--   keep render distance OFF: set the real engine quality level (shorter draw distance when low)
+function Perf.applyQuality()
+	local L = Perf.qualityTarget
+	if not L then
+		return
+	end
+	if Perf.keepDistance then
+		Perf.level = math.max(1, math.ceil(L * 10 / 21))
+		Perf.reapply()
+		Perf.pinDistance(L < 21)
+	else
+		Perf.level = 10
+		Perf.reapply()
+		Perf.pinDistance(false)
+		Perf.quality(L)
+	end
+end
+
 function Perf.restoreAll()
+	Perf.pinDistance(false)
+	Perf.clearFog(false)
 	for name in pairs(WORLD) do
 		Perf.world(name, false)
 	end
 	Perf.shadows(false)
 	Perf.postfx(false)
 	Perf.terrain(false)
+	Perf.meshDetail(false)
 	if Perf.render3dOff then
 		Perf.render3d(false)
 	end
@@ -3764,10 +3940,14 @@ do
 	local gRender = COMP.Group(page, "Rendering")
 	local q = 10
 	pcall(function()
-		q = math.clamp(settings().Rendering.QualityLevel.Value, 1, 21)
+		local v = settings().Rendering.QualityLevel.Value
+		if v >= 1 then
+			q = math.clamp(v, 1, 21)
+		end
 	end)
 	COMP.Slider(gRender, {
 		key = "perf.quality",
+		noReset = true,
 		text = "Graphics quality",
 		min = 1,
 		max = 21,
@@ -3777,14 +3957,62 @@ do
 			return "Level " .. math.floor(v + 0.5)
 		end,
 		callback = function(v)
-			Perf.quality(v)
+			Perf.qualityTarget = v
+			Perf.applyQuality()
 		end,
 	})
+	COMP.Toggle(gRender, {
+		key = "perf.keepdist",
+		text = "Keep render distance max",
+		desc = "Low quality cuts effects, not draw distance. Off = real engine level",
+		default = true,
+		callback = function(on)
+			Perf.keepDistance = on
+			Perf.applyQuality()
+		end,
+	})
+	COMP.Toggle(gRender, {
+		key = "perf.fog",
+		text = "Remove distance fog",
+		desc = "Fog and haze make far objects fade out",
+		default = false,
+		callback = function(on)
+			Perf.clearFog(on)
+		end,
+	})
+	COMP.Toggle(gRender, {
+		key = "perf.lod",
+		text = "Full detail at distance",
+		desc = "Stops far models and meshes from turning low-poly",
+		default = false,
+		callback = function(on)
+			Perf.world("lod", on)
+		end,
+	})
+	do
+		local r = newRow(gRender, 52)
+		rowLabel(r, "Game streaming", nil, 0.4)
+		local v = label({
+			AnchorPoint = Vector2.new(1, 0.5),
+			Position = UDim2.new(1, -16, 0.5, 0),
+			Size = UDim2.new(0.6, 0, 0, 18),
+			TextXAlignment = Enum.TextXAlignment.Right,
+			TextColor3 = C.sub,
+			TextSize = 13,
+		}, r)
+		local text = "Off"
+		pcall(function()
+			if Workspace.StreamingEnabled then
+				text = "On, " .. math.floor(Workspace.StreamingTargetRadius) .. " studs (server decides)"
+			end
+		end)
+		v.Text = text
+	end
 	COMP.Toggle(gRender, {
 		key = "perf.shadows",
 		text = "Disable shadows",
 		callback = function(on)
-			Perf.shadows(on)
+			Perf.setManual("shadows", on)
 		end,
 	})
 	COMP.Toggle(gRender, {
@@ -3792,7 +4020,7 @@ do
 		text = "Disable post-processing",
 		desc = "Bloom, blur, sun rays, depth of field",
 		callback = function(on)
-			Perf.postfx(on)
+			Perf.setManual("postfx", on)
 		end,
 	})
 	COMP.Toggle(gRender, {
@@ -3800,7 +4028,7 @@ do
 		text = "Disable particles and effects",
 		desc = "Particles, trails, beams, fire, smoke",
 		callback = function(on)
-			Perf.world("particles", on)
+			Perf.setManual("particles", on)
 		end,
 	})
 	COMP.Toggle(gRender, {
@@ -3819,14 +4047,14 @@ do
 		text = "Smooth plastic materials",
 		desc = "Flattens every material for less GPU load",
 		callback = function(on)
-			Perf.world("smooth", on)
+			Perf.setManual("smooth", on)
 		end,
 	})
 	COMP.Toggle(gWorld, {
 		key = "perf.textures",
 		text = "Hide textures and decals",
 		callback = function(on)
-			Perf.world("textures", on)
+			Perf.setManual("textures", on)
 		end,
 	})
 	COMP.Toggle(gWorld, {
@@ -3834,7 +4062,7 @@ do
 		text = "Simplify terrain and water",
 		desc = "No grass decoration, flat water",
 		callback = function(on)
-			Perf.terrain(on)
+			Perf.setManual("terrain", on)
 		end,
 	})
 	COMP.Button(gWorld, {
@@ -5462,14 +5690,22 @@ do
 		end
 		Soru.rBusy = true
 		task.spawn(function()
-			task.wait(math.max(Soru.rgap, 10) / 1000)
+			local gap = math.max(Soru.rgap, 10) / 1000
 			while Soru.rspam and rDown() and not typing() do
+				task.wait(gap)
+				-- re-check right before sending so it stops the moment R is released
+				if not (Soru.rspam and rDown() and not typing()) then
+					break
+				end
 				pcall(function()
 					VIM:SendKeyEvent(false, Enum.KeyCode.R, false, game)
 					VIM:SendKeyEvent(true, Enum.KeyCode.R, false, game)
 				end)
-				task.wait(math.max(Soru.rgap, 10) / 1000)
 			end
+			-- let go of R so the game doesn't think it is still held
+			pcall(function()
+				VIM:SendKeyEvent(false, Enum.KeyCode.R, false, game)
+			end)
 			Soru.rBusy = false
 		end)
 	end
@@ -5615,7 +5851,9 @@ end
 -- MOVEMENT  (Sang Z tap launch + Diamond click boost, from Taco Shop v5)
 --========================================================================
 local Move = {
-	sang = { on = false, key = Enum.KeyCode.Z, toggleKey = Enum.KeyCode.V, min = 600, max = 800, lift = 0.2, cooldown = 8.5, duration = 0.5, style = true, last = 0 },
+	method = "Auto",
+	debug = true,
+	sang = { on = false, key = Enum.KeyCode.Z, toggleKey = Enum.KeyCode.V, min = 600, max = 800, lift = 0.2, cooldown = 8.5, delay = 0.5, duration = 0.5, style = true, last = 0 },
 	diamond = { on = false, toggleKey = Enum.KeyCode.B, power = 350, cooldown = 3.5, duration = 0.5, style = true, last = 0 },
 }
 
@@ -5628,37 +5866,63 @@ do
 		return UserInputService:GetFocusedTextBox() ~= nil
 	end
 
-	-- style detection: equipped tool name, attributes, or style text in the game UI
-	local function hasStyle(word, uiWord)
+	local lastSay = 0
+	local function say(title, msg)
+		if os.clock() - lastSay > 2.5 then
+			lastSay = os.clock()
+			toast(title, msg, 3)
+		end
+	end
+
+	-- a GuiObject only counts if it and everything above it is actually visible
+	local function visibleChain(d)
+		local x = d
+		while x and not x:IsA("PlayerGui") do
+			if x:IsA("GuiObject") and not x.Visible then
+				return false
+			end
+			if x:IsA("ScreenGui") and not x.Enabled then
+				return false
+			end
+			x = x.Parent
+		end
+		return true
+	end
+
+	-- strict style detection: needs a positive hit on the EQUIPPED tool, an attribute,
+	-- or the style's move text visible on screen. Returns ok, reason.
+	local function detectStyle(word, uiWord)
 		local char = LocalPlayer.Character
 		if not char then
-			return false
-		end
-		local function check(inst)
-			if string.find(string.lower(inst.Name), word, 1, true) then
-				return true
-			end
-			for _, v in pairs(inst:GetAttributes()) do
-				if type(v) == "string" and string.find(string.lower(v), word, 1, true) then
-					return true
-				end
-			end
-			return false
+			return false, "no character"
 		end
 		local tool = char:FindFirstChildOfClass("Tool")
-		if (tool and check(tool)) or check(char) then
-			return true
+		if tool then
+			if string.find(string.lower(tool.Name), word, 1, true) then
+				return true, tool.Name
+			end
+			for _, v in pairs(tool:GetAttributes()) do
+				if type(v) == "string" and string.find(string.lower(v), word, 1, true) then
+					return true, tool.Name
+				end
+			end
+		end
+		for _, v in pairs(char:GetAttributes()) do
+			if type(v) == "string" and string.find(string.lower(v), word, 1, true) then
+				return true, "character attribute"
+			end
 		end
 		local pg = LocalPlayer:FindFirstChild("PlayerGui")
 		if pg then
 			for _, d in ipairs(pg:GetDescendants()) do
-				if d:IsA("TextLabel") and d.Visible and string.find(string.lower(d.Text), uiWord, 1, true) then
-					return true
+				if d:IsA("TextLabel") and string.find(string.lower(d.Text), uiWord, 1, true) and visibleChain(d) then
+					return true, "UI text"
 				end
 			end
 		end
-		return false
+		return false, tool and ("equipped: " .. tool.Name) or "nothing equipped"
 	end
+	Move.detect = detectStyle
 
 	local function lookDir(lift)
 		local cam = Workspace.CurrentCamera
@@ -5668,8 +5932,13 @@ do
 		return (cam.CFrame.LookVector + Vector3.new(0, lift, 0)).Unit
 	end
 
-	-- velocity launch: full speed, brake over the last 30%, 10% carried out, stops at walls
-	local function launch(dir, power, duration)
+	-- Launch methods:
+	--   Constraint  a physics LinearVelocity with unlimited force (hard for the game to override)
+	--   CFrame      glides the character by moving its CFrame every frame
+	--   Velocity    sets AssemblyLinearVelocity every frame (old behaviour)
+	--   Auto        starts with Constraint, switches to CFrame if the character barely moves
+	-- Speed profile: eases in fast (not instant), brakes over the last 30%, 10% carried out.
+	local function launch(dir, power, duration, ramp, label)
 		local char = LocalPlayer.Character
 		local root = char and char:FindFirstChild("HumanoidRootPart")
 		local hum = char and char:FindFirstChildOfClass("Humanoid")
@@ -5677,68 +5946,216 @@ do
 			return false
 		end
 		if active then
-			active.conn:Disconnect()
+			active.stop("replaced")
 			active = nil
 		end
 		params.FilterDescendantsInstances = { char }
+		params.RespectCanCollide = true -- ignore invisible hitboxes / triggers
+		-- lift off the floor and leave ground physics so the launch can't get eaten
+		if hum.FloorMaterial ~= Enum.Material.Air then
+			root.CFrame = root.CFrame + Vector3.new(0, 1.5, 0)
+		end
+		hum:ChangeState(Enum.HumanoidStateType.Freefall)
+
+		-- game movers on the root (body velocity, constraints) would overpower our velocity
+		local saved, seen = {}, {}
+		local function suppress()
+			for _, m in ipairs(root:GetChildren()) do
+				if not seen[m] then
+					if m:IsA("BodyVelocity") or m:IsA("BodyPosition") then
+						seen[m] = true
+						table.insert(saved, { m, "MaxForce", m.MaxForce })
+						m.MaxForce = Vector3.zero
+					elseif m:IsA("LinearVelocity") or m:IsA("AlignPosition") or m:IsA("VectorForce") then
+						if m.Name ~= "KWBoost" then
+							seen[m] = true
+							table.insert(saved, { m, "Enabled", m.Enabled })
+							m.Enabled = false
+						end
+					end
+				end
+			end
+		end
+		suppress()
+
+		local startPos = root.Position
+		local method = Move.method == "Auto" and "Constraint" or Move.method
+		local switched = false
+		local lv, att
+		local function constraint(on)
+			if on then
+				att = Instance.new("Attachment")
+				att.Name = "KWBoostAtt"
+				att.Parent = root
+				lv = Instance.new("LinearVelocity")
+				lv.Name = "KWBoost"
+				lv.Attachment0 = att
+				lv.MaxForce = math.huge
+				lv.VelocityConstraintMode = Enum.VelocityConstraintMode.Vector
+				lv.RelativeTo = Enum.ActuatorRelativeTo.World
+				lv.VectorVelocity = Vector3.zero
+				lv.Parent = root
+			else
+				if lv then
+					lv:Destroy()
+					lv = nil
+				end
+				if att then
+					att:Destroy()
+					att = nil
+				end
+			end
+		end
+		if method == "Constraint" then
+			constraint(true)
+		end
+
 		local t0 = os.clock()
-		local me = {}
-		local function stop()
+		local nextScan = 0
+		local expected, peak = 0, 0
+		local me = { done = false }
+		local function stop(why)
+			if me.done then
+				return
+			end
+			me.done = true
 			me.conn:Disconnect()
+			constraint(false)
 			if active == me then
 				active = nil
 			end
+			for _, sv in ipairs(saved) do
+				pcall(function()
+					if sv[1].Parent then
+						sv[1][sv[2]] = sv[3]
+					end
+				end)
+			end
+			if root.Parent then
+				root.AssemblyLinearVelocity = why == "finished" and dir * power * 0.1 or Vector3.zero
+				if Move.debug and why ~= "replaced" then
+					local moved = (root.Position - startPos).Magnitude
+					toast(
+						(label or "Boost") .. ": " .. why,
+						string.format(
+							"%s%s | peak %d studs/s | moved %d of %d studs",
+							method,
+							switched and " (auto-switched)" or "",
+							peak,
+							moved,
+							expected
+						),
+						4
+					)
+				end
+			end
 		end
+		me.stop = stop
+
 		me.conn = RunService.Heartbeat:Connect(function(dt)
-			local t = (os.clock() - t0) / duration
+			local el = os.clock() - t0
+			if el >= nextScan then
+				nextScan = el + 0.1
+				suppress()
+			end
+			local t = el / duration
 			local blocked = hum.Health <= 0
 				or hum.Sit
 				or char:GetAttribute("Ragdoll") == true
 				or hum:GetState() == Enum.HumanoidStateType.Ragdoll
 			if blocked or not root.Parent then
-				stop()
+				stop("cancelled (dead, ragdoll or seated)")
 				return
 			end
 			if t >= 1 then
-				root.AssemblyLinearVelocity = dir * power * 0.1
-				stop()
+				stop("finished")
 				return
 			end
 			local speed = power
+			local r = math.min(el / ramp, 1)
+			speed = speed * (1 - (1 - r) * (1 - r)) -- ease-out ramp up
 			if t > 0.7 then
-				speed = power * (1 - 0.9 * ((t - 0.7) / 0.3))
+				speed = speed * (1 - 0.9 * ((t - 0.7) / 0.3))
 			end
-			local hit = Workspace:Blockcast(CFrame.new(root.Position), Vector3.new(2, 4, 2), dir * (speed * dt + 2), params)
-			if hit then
+			if el > 0.12 then
+				-- look ahead for a wall; floors are ignored, and we slow down instead of
+				-- dying on any object that is merely somewhere in front of us
+				local look = math.min(speed * dt + 3, 25)
+				local hit = Workspace:Blockcast(CFrame.new(root.Position), Vector3.new(1.6, 3, 1.6), dir * look, params)
+				if hit and hit.Normal.Y < 0.7 then
+					if hit.Distance < 2.5 then
+						if el < 0.4 then
+							say((label or "Boost") .. " blocked", "Something solid is right in front of you.")
+						end
+						stop("hit a wall")
+						return
+					end
+					speed = math.min(speed, math.max((hit.Distance - 1.5) / math.max(dt, 0.001), 0))
+				end
+			end
+			expected += speed * dt
+			peak = math.max(peak, speed)
+
+			-- Auto: if the constraint barely moved us, glide with the CFrame instead
+			if Move.method == "Auto" and method == "Constraint" and el > 0.2 then
+				if (root.Position - startPos).Magnitude < expected * 0.3 then
+					constraint(false)
+					method = "CFrame"
+					switched = true
+				end
+			end
+
+			if method == "Constraint" then
+				if lv then
+					lv.VectorVelocity = dir * speed
+				end
+			elseif method == "CFrame" then
 				root.AssemblyLinearVelocity = Vector3.zero
-				stop()
-				return
+				root.CFrame = root.CFrame + dir * (speed * dt)
+			else
+				root.AssemblyLinearVelocity = dir * speed
 			end
-			root.AssemblyLinearVelocity = dir * speed
 		end)
 		active = me
 		return true
 	end
 	onUnload(function()
 		if active then
-			active.conn:Disconnect()
+			active.stop("replaced")
 			active = nil
 		end
 	end)
 
+	-- press the ability, wait `delay`, then launch where you are looking at that moment.
+	-- Speed is capped at 800: above that the game rejects the velocity and snaps you back.
+	local MAX_POWER = 800
 	function Move.sangFire()
 		local s = Move.sang
-		if not s.on or os.clock() - s.last < s.cooldown then
+		if not s.on then
 			return
 		end
-		if s.style and not hasStyle("sanguine", "bloodbane") then
+		local left = s.cooldown - (os.clock() - s.last)
+		if left > 0 then
+			say("Sang Z on cooldown", string.format("%.1fs left", left))
 			return
 		end
-		local lo, hi = math.min(s.min, s.max), math.max(s.min, s.max)
-		local dir = lookDir(s.lift)
-		if dir and launch(dir, lo + math.random() * (hi - lo), s.duration) then
-			s.last = os.clock()
+		local ok, why = detectStyle("sanguine", "bloodbane")
+		if not ok then
+			say("Sang Z blocked", "Sanguine Art not detected (" .. why .. ")")
+			return
 		end
+		s.last = os.clock()
+		task.delay(s.delay, function()
+			if not s.on then
+				return
+			end
+			local lo = math.clamp(math.min(s.min, s.max), 150, MAX_POWER)
+			local hi = math.clamp(math.max(s.min, s.max), 150, MAX_POWER)
+			local dir = lookDir(s.lift)
+			if dir then
+				launch(dir, lo + math.random() * (hi - lo), s.duration, 0.14, "Sang Z")
+			end
+		end)
 	end
 
 	function Move.diamondFire()
@@ -5746,11 +6163,15 @@ do
 		if not d.on or os.clock() - d.last < d.cooldown then
 			return
 		end
-		if d.style and not hasStyle("diamond", "diamond") then
-			return
+		if d.style then
+			local ok, why = detectStyle("diamond", "diamond")
+			if not ok then
+				say("Diamond blocked", "Diamond not detected (" .. why .. ")")
+				return
+			end
 		end
 		local dir = lookDir(0)
-		if dir and launch(dir, d.power, d.duration) then
+		if dir and launch(dir, d.power, d.duration, 0.08, "Diamond") then
 			d.last = os.clock()
 		end
 	end
@@ -5810,7 +6231,7 @@ do
 		key = "move.sang.min",
 		text = "Min power",
 		min = 150,
-		max = 1200,
+		max = 800,
 		step = 10,
 		default = s.min,
 		callback = function(v)
@@ -5821,7 +6242,7 @@ do
 		key = "move.sang.max",
 		text = "Max power",
 		min = 150,
-		max = 1200,
+		max = 800,
 		step = 10,
 		default = s.max,
 		callback = function(v)
@@ -5841,6 +6262,30 @@ do
 		end,
 	})
 	COMP.Slider(gS, {
+		key = "move.sang.duration",
+		text = "Launch duration",
+		min = 0.3,
+		max = 1.5,
+		step = 0.05,
+		default = s.duration,
+		suffix = " s",
+		callback = function(v)
+			s.duration = v
+		end,
+	})
+	COMP.Slider(gS, {
+		key = "move.sang.delay",
+		text = "Delay after ability",
+		min = 0,
+		max = 2,
+		step = 0.05,
+		default = s.delay,
+		suffix = " s",
+		callback = function(v)
+			s.delay = v
+		end,
+	})
+	COMP.Slider(gS, {
 		key = "move.sang.cd",
 		text = "Cooldown",
 		min = 0,
@@ -5852,13 +6297,33 @@ do
 			s.cooldown = v
 		end,
 	})
-	COMP.Toggle(gS, {
-		key = "move.sang.style",
-		text = "Only with Sanguine equipped",
-		desc = "Turn this off if the boost never triggers",
+	COMP.Button(gS, {
+		text = "Check Sanguine detection",
+		desc = "Sang Z only works with Sanguine Art equipped",
+		buttonText = "Check",
+		callback = function()
+			local ok, why = Move.detect("sanguine", "bloodbane")
+			toast(ok and "Sanguine Art detected" or "Sanguine Art not detected", why, 3.5)
+		end,
+	})
+
+	local gE = COMP.Group(page, "Boost engine")
+	COMP.Dropdown(gE, {
+		key = "move.method",
+		text = "Boost method",
+		options = { "Auto", "Constraint", "CFrame", "Velocity" },
+		default = Move.method,
+		callback = function(v)
+			Move.method = v
+		end,
+	})
+	COMP.Toggle(gE, {
+		key = "move.debug",
+		text = "Show launch debug",
+		desc = "Toast with peak speed, distance moved and why it stopped",
 		default = true,
 		callback = function(on)
-			s.style = on
+			Move.debug = on
 		end,
 	})
 
@@ -6446,36 +6911,33 @@ if IS_OWNER then
 end
 
 --========================================================================
--- AIM  (camlock, silent aim, FOV, team check, triggerbot)
+-- AIM  (camlock: pickable key, hold or toggle, players / NPCs)
 -- Only runs for approved users (Access.has()).
 --========================================================================
 local Aim = {
 	s = {
 		camlock = false,
-		silent = false,
-		trigger = false,
+		mode = "Hold", -- Hold / Toggle
+		bindKind = "mouse", -- "mouse" or "key"
+		bindName = "MouseButton2",
+		targets = "Players", -- Players / NPCs / Both
 		teamCheck = true,
 		wallCheck = false,
 		part = "Head",
-		key = "Right Mouse",
 		smooth = 5,
 		fov = 150,
 		showFov = true,
 		fovColor = rgb(255, 255, 255),
 		prediction = 0,
-		hitChance = 100,
-		triggerDelay = 60,
-		triggerHold = false,
 	},
 	locked = nil,
-	silentPart = nil,
-	silentPos = nil,
-	trigBusy = false,
+	held = false,
+	toggled = false,
+	npcs = {}, -- model -> humanoid
 }
 
 do
 	local s = Aim.s
-	local VIM = game:GetService("VirtualInputManager")
 
 	local fovLayer = new("Frame", {
 		Name = "AimFov",
@@ -6496,6 +6958,59 @@ do
 	local rayParams = RaycastParams.new()
 	rayParams.FilterType = Enum.RaycastFilterType.Exclude
 
+	-- ---- NPC tracking (humanoid models that aren't players)
+	local npcOn = false
+	local npcAdd, npcRem
+	local function trackNpc(hum)
+		local m = hum.Parent
+		if m and m:IsA("Model") and m ~= LocalPlayer.Character and not Players:GetPlayerFromCharacter(m) then
+			Aim.npcs[m] = hum
+		end
+	end
+	local function setNpcTracking(on)
+		if on == npcOn then
+			return
+		end
+		npcOn = on
+		if npcAdd then
+			npcAdd:Disconnect()
+			npcAdd = nil
+		end
+		if npcRem then
+			npcRem:Disconnect()
+			npcRem = nil
+		end
+		if on then
+			npcAdd = Workspace.DescendantAdded:Connect(function(d)
+				if d:IsA("Humanoid") then
+					task.defer(trackNpc, d)
+				end
+			end)
+			npcRem = Workspace.DescendantRemoving:Connect(function(d)
+				if d:IsA("Humanoid") and d.Parent then
+					Aim.npcs[d.Parent] = nil
+				end
+			end)
+			task.spawn(function()
+				local list = Workspace:GetDescendants()
+				for i, d in ipairs(list) do
+					if not npcOn then
+						return
+					end
+					if d:IsA("Humanoid") then
+						trackNpc(d)
+					end
+					if i % 500 == 0 then
+						task.wait()
+					end
+				end
+			end)
+		else
+			Aim.npcs = {}
+		end
+	end
+
+	-- ---- targeting
 	local function isEnemy(plr)
 		if plr == LocalPlayer then
 			return false
@@ -6511,20 +7026,49 @@ do
 		return hum ~= nil and hum.Health > 0 and char:FindFirstChildOfClass("ForceField") == nil
 	end
 
+	local function eachTarget(fn)
+		if s.targets ~= "NPCs" then
+			for _, plr in ipairs(Players:GetPlayers()) do
+				if plr.Character and isEnemy(plr) then
+					fn(plr.Character)
+				end
+			end
+		end
+		if s.targets ~= "Players" then
+			for model, hum in pairs(Aim.npcs) do
+				if model.Parent and hum.Parent == model then
+					fn(model)
+				else
+					Aim.npcs[model] = nil
+				end
+			end
+		end
+	end
+
+	local function pick(char, names)
+		for _, n in ipairs(names) do
+			local p = char:FindFirstChild(n)
+			if p and p:IsA("BasePart") then
+				return p
+			end
+		end
+		return nil
+	end
+
 	local function aimPart(char, cam, mouse)
 		local p = s.part
 		if p == "Head" then
-			return char:FindFirstChild("Head")
+			return pick(char, { "Head", "HumanoidRootPart", "UpperTorso", "Torso" }) or char.PrimaryPart
 		elseif p == "Torso" then
-			return char:FindFirstChild("UpperTorso") or char:FindFirstChild("Torso")
+			return pick(char, { "UpperTorso", "Torso", "HumanoidRootPart", "Head" }) or char.PrimaryPart
 		elseif p == "Root" then
-			return char:FindFirstChild("HumanoidRootPart")
+			return pick(char, { "HumanoidRootPart", "Torso", "UpperTorso", "Head" }) or char.PrimaryPart
 		end
-		-- "Closest": whichever of head / torso / root is nearest the cursor
+		-- "Closest": whichever body part is nearest the cursor
 		local best, bestD
 		for _, n in ipairs({ "Head", "UpperTorso", "Torso", "HumanoidRootPart" }) do
 			local part = char:FindFirstChild(n)
-			if part then
+			if part and part:IsA("BasePart") then
 				local sp = cam:WorldToViewportPoint(part.Position)
 				local d = (Vector2.new(sp.X, sp.Y) - mouse).Magnitude
 				if not bestD or d < bestD then
@@ -6532,7 +7076,7 @@ do
 				end
 			end
 		end
-		return best
+		return best or char.PrimaryPart
 	end
 
 	local function lineOfSight(cam, part, char)
@@ -6548,128 +7092,65 @@ do
 	local function findTarget(cam)
 		local mouse = UserInputService:GetMouseLocation()
 		local best, bestD = nil, s.fov
-		for _, plr in ipairs(Players:GetPlayers()) do
-			local char = plr.Character
-			if isEnemy(plr) and isAlive(char) then
-				local part = aimPart(char, cam, mouse)
-				if part then
-					local sp = cam:WorldToViewportPoint(part.Position)
-					if sp.Z > 0 then
-						local d = (Vector2.new(sp.X, sp.Y) - mouse).Magnitude
-						if d < bestD and (not s.wallCheck or lineOfSight(cam, part, char)) then
-							best, bestD = part, d
-						end
-					end
-				end
+		eachTarget(function(char)
+			if not isAlive(char) then
+				return
 			end
-		end
+			local part = aimPart(char, cam, mouse)
+			if not part then
+				return
+			end
+			local sp = cam:WorldToViewportPoint(part.Position)
+			if sp.Z <= 0 then
+				return
+			end
+			local d = (Vector2.new(sp.X, sp.Y) - mouse).Magnitude
+			if d < bestD and (not s.wallCheck or lineOfSight(cam, part, char)) then
+				best, bestD = part, d
+			end
+		end)
 		return best
 	end
 
-	local function predicted(part)
-		return part.Position + part.AssemblyLinearVelocity * s.prediction
+	-- ---- aim key (keyboard key or mouse button), hold or toggle
+	local function matches(input)
+		if s.bindKind == "mouse" then
+			return input.UserInputType.Name == s.bindName
+		end
+		return input.UserInputType == Enum.UserInputType.Keyboard and input.KeyCode.Name == s.bindName
 	end
-
-	local MOUSE = {
-		["Right Mouse"] = Enum.UserInputType.MouseButton2,
-		["Left Mouse"] = Enum.UserInputType.MouseButton1,
-		["Middle Mouse"] = Enum.UserInputType.MouseButton3,
-	}
-	local function keyHeld()
-		local k = s.key
-		if k == "Always on" then
-			return true
+	bindConn(UserInputService.InputBegan, function(input, gp)
+		if not matches(input) or state.listening then
+			return
 		end
-		if MOUSE[k] then
-			return UserInputService:IsMouseButtonPressed(MOUSE[k])
+		if s.bindKind == "key" and UserInputService:GetFocusedTextBox() then
+			return
 		end
-		local kc = Enum.KeyCode[(k:gsub(" ", ""))]
-		return kc ~= nil and UserInputService:IsKeyDown(kc)
-	end
-
-	-- ---- silent aim: redirects Mouse.Hit / Mouse.Target and Raycast / FindPartOnRay calls
-	local hooked = false
-	function Aim.installHooks()
-		if hooked then
-			return true
+		if s.bindKind == "mouse" and gp then
+			return
 		end
-		if type(hookmetamethod) ~= "function" or type(getnamecallmethod) ~= "function" then
-			return false
-		end
-		local wrap = type(newcclosure) == "function" and newcclosure or function(f)
-			return f
-		end
-		local fromScript = type(checkcaller) == "function" and checkcaller or function()
-			return false
-		end
-		local mouse = LocalPlayer:GetMouse()
-		local oldIndex, oldNamecall
-		local ok = pcall(function()
-			oldIndex = hookmetamethod(
-				game,
-				"__index",
-				wrap(function(self, key)
-					if Aim.silentPart and self == mouse and (key == "Hit" or key == "Target") and not fromScript() then
-						if math.random(100) <= s.hitChance then
-							if key == "Hit" then
-								return CFrame.new(Aim.silentPos)
-							end
-							return Aim.silentPart
-						end
-					end
-					return oldIndex(self, key)
-				end)
-			)
-			oldNamecall = hookmetamethod(
-				game,
-				"__namecall",
-				wrap(function(self, ...)
-					if Aim.silentPart and self == Workspace and not fromScript() then
-						local method = getnamecallmethod()
-						local n = select("#", ...)
-						local a = { ... }
-						if method == "Raycast" then
-							if typeof(a[1]) == "Vector3" and typeof(a[2]) == "Vector3" and math.random(100) <= s.hitChance then
-								a[2] = (Aim.silentPos - a[1]).Unit * a[2].Magnitude
-								return oldNamecall(self, table.unpack(a, 1, n))
-							end
-						elseif
-							method == "FindPartOnRay"
-							or method == "FindPartOnRayWithIgnoreList"
-							or method == "FindPartOnRayWithWhitelist"
-						then
-							local ray = a[1]
-							if typeof(ray) == "Ray" and math.random(100) <= s.hitChance then
-								a[1] = Ray.new(ray.Origin, (Aim.silentPos - ray.Origin).Unit * ray.Direction.Magnitude)
-								return oldNamecall(self, table.unpack(a, 1, n))
-							end
-						end
-					end
-					return oldNamecall(self, ...)
-				end)
-			)
-		end)
-		hooked = ok
-		return ok
-	end
-
-	local function click()
-		pcall(function()
-			if type(mouse1click) == "function" then
-				mouse1click()
-			else
-				local p = UserInputService:GetMouseLocation()
-				VIM:SendMouseButtonEvent(p.X, p.Y, 0, true, game, 1)
-				task.wait(0.02)
-				VIM:SendMouseButtonEvent(p.X, p.Y, 0, false, game, 1)
+		if s.mode == "Toggle" then
+			Aim.toggled = not Aim.toggled
+			if not Aim.toggled then
+				Aim.locked = nil
 			end
-		end)
+		else
+			Aim.held = true
+		end
+	end)
+	bindConn(UserInputService.InputEnded, function(input)
+		if matches(input) then
+			Aim.held = false
+		end
+	end)
+
+	function Aim.reset()
+		Aim.held, Aim.toggled, Aim.locked = false, false, nil
 	end
 
 	local function step(dt)
-		local allowed = Access.has()
-		local anyOn = s.camlock or s.silent or s.trigger
-		local circle = allowed and s.showFov and anyOn
+		local allowed = Access.has() and s.camlock
+		local circle = allowed and s.showFov
 		fovLayer.Visible = circle
 		if circle then
 			local m = UserInputService:GetMouseLocation()
@@ -6677,51 +7158,22 @@ do
 			fovCircle.Size = UDim2.fromOffset(s.fov * 2, s.fov * 2)
 			fovStroke.Color = s.fovColor
 		end
+		setNpcTracking(allowed and s.targets ~= "Players")
 		local cam = Workspace.CurrentCamera
-		if not (allowed and anyOn and cam) then
-			Aim.locked, Aim.silentPart = nil, nil
+		local active = (s.mode == "Toggle") and Aim.toggled or (s.mode ~= "Toggle" and Aim.held)
+		if not (allowed and cam and active) then
+			Aim.locked = nil
 			return
 		end
-
-		if s.silent then
-			local part = findTarget(cam)
-			Aim.silentPart = part
-			Aim.silentPos = part and predicted(part) or nil
-		else
-			Aim.silentPart = nil
+		local t = Aim.locked
+		if not (t and t.Parent and isAlive(t.Parent)) then
+			t = findTarget(cam)
+			Aim.locked = t
 		end
-
-		if s.camlock and keyHeld() then
-			local t = Aim.locked
-			if not (t and t.Parent and isAlive(t.Parent)) then
-				t = findTarget(cam)
-				Aim.locked = t
-			end
-			if t then
-				local goal = CFrame.lookAt(cam.CFrame.Position, predicted(t))
-				local alpha = s.smooth <= 1 and 1 or (1 - (1 - 1 / s.smooth) ^ (dt * 60))
-				cam.CFrame = cam.CFrame:Lerp(goal, alpha)
-			end
-		else
-			Aim.locked = nil
-		end
-
-		if s.trigger and not Aim.trigBusy and (not s.triggerHold or keyHeld()) then
-			local m = UserInputService:GetMouseLocation()
-			local ray = cam:ViewportPointToRay(m.X, m.Y)
-			rayParams.FilterDescendantsInstances = LocalPlayer.Character and { LocalPlayer.Character } or {}
-			local hit = Workspace:Raycast(ray.Origin, ray.Direction * 1000, rayParams)
-			local inst = hit and hit.Instance
-			local char = inst and inst:FindFirstAncestorOfClass("Model")
-			local plr = char and Players:GetPlayerFromCharacter(char)
-			if plr and isEnemy(plr) and isAlive(char) then
-				Aim.trigBusy = true
-				task.delay(s.triggerDelay / 1000, function()
-					click()
-					task.wait(0.08)
-					Aim.trigBusy = false
-				end)
-			end
+		if t then
+			local goal = CFrame.lookAt(cam.CFrame.Position, t.Position + t.AssemblyLinearVelocity * s.prediction)
+			local alpha = s.smooth <= 1 and 1 or (1 - (1 - 1 / s.smooth) ^ (dt * 60))
+			cam.CFrame = cam.CFrame:Lerp(goal, alpha)
 		end
 	end
 
@@ -6733,7 +7185,7 @@ do
 		pcall(function()
 			RunService:UnbindFromRenderStep("KevinwareAim")
 		end)
-		Aim.silentPart = nil
+		setNpcTracking(false)
 		fovLayer.Visible = false
 	end)
 end
@@ -6746,7 +7198,13 @@ do
 		g.box.Parent.Visible = Access.has()
 		return g
 	end
-	local KEYS = { "Right Mouse", "Left Mouse", "Middle Mouse", "E", "Q", "Left Shift", "Left Alt", "Always on" }
+	local function prettyBind()
+		if s.bindKind == "mouse" then
+			return ({ MouseButton1 = "Left Mouse", MouseButton2 = "Right Mouse", MouseButton3 = "Middle Mouse" })[s.bindName]
+				or s.bindName
+		end
+		return (s.bindName:gsub("(%l)(%u)", "%1 %2"))
+	end
 
 	local gCam = gated(COMP.Group(page, "Camlock"))
 	COMP.Toggle(gCam, {
@@ -6756,15 +7214,87 @@ do
 		default = false,
 		callback = function(on)
 			s.camlock = on
+			Aim.reset()
+		end,
+	})
+
+	-- aim key: click, then press any key or mouse button (Backspace = Right Mouse)
+	local bindBtn
+	do
+		local r = newRow(gCam, 60)
+		rowLabel(r, "Aim key", "Click, then press any key or mouse button", 0.55)
+		bindBtn = makeButton(r, prettyBind(), "ghost", 140, 32, {
+			AnchorPoint = Vector2.new(1, 0.5),
+			Position = UDim2.new(1, -16, 0.5, 0),
+		})
+		bindBtn.Button.MouseButton1Click:Connect(function()
+			if state.listening then
+				return
+			end
+			state.listening = true
+			bindBtn.SetText("Press a key...")
+			local conn
+			conn = UserInputService.InputBegan:Connect(function(input)
+				local t = input.UserInputType
+				local kind, name
+				if t == Enum.UserInputType.Keyboard then
+					if input.KeyCode == Enum.KeyCode.Escape then
+						conn:Disconnect()
+						task.delay(0.1, function()
+							state.listening = false
+						end)
+						bindBtn.SetText(prettyBind())
+						return
+					end
+					if input.KeyCode == Enum.KeyCode.Backspace then
+						kind, name = "mouse", "MouseButton2"
+					else
+						kind, name = "key", input.KeyCode.Name
+					end
+				elseif t == Enum.UserInputType.MouseButton1 or t == Enum.UserInputType.MouseButton2 or t == Enum.UserInputType.MouseButton3 then
+					kind, name = "mouse", t.Name
+				else
+					return
+				end
+				conn:Disconnect()
+				task.delay(0.1, function()
+					state.listening = false
+				end)
+				s.bindKind, s.bindName = kind, name
+				Aim.reset()
+				bindBtn.SetText(prettyBind())
+				Cfg.dirty()
+			end)
+		end)
+		Cfg.add("aim.bind", function()
+			return s.bindKind .. ":" .. s.bindName
+		end, function(v)
+			local kind, name = tostring(v):match("^(%a+):(.+)$")
+			if (kind == "mouse" or kind == "key") and name then
+				s.bindKind, s.bindName = kind, name
+				bindBtn.SetText(prettyBind())
+			end
+		end)
+	end
+
+	COMP.Dropdown(gCam, {
+		key = "aim.mode",
+		text = "Key mode",
+		options = { "Hold", "Toggle" },
+		default = s.mode,
+		callback = function(v)
+			s.mode = v
+			Aim.reset()
 		end,
 	})
 	COMP.Dropdown(gCam, {
-		key = "aim.key",
-		text = "Aim key",
-		options = KEYS,
-		default = s.key,
+		key = "aim.targets",
+		text = "Targets",
+		options = { "Players", "NPCs", "Both" },
+		default = s.targets,
 		callback = function(v)
-			s.key = v
+			s.targets = v
+			Aim.locked = nil
 		end,
 	})
 	COMP.Dropdown(gCam, {
@@ -6802,37 +7332,11 @@ do
 		end,
 	})
 
-	local gSil = gated(COMP.Group(page, "Silent aim"))
-	COMP.Toggle(gSil, {
-		key = "aim.silent",
-		text = "Silent aim",
-		desc = "Redirects your shots without moving the camera",
-		default = false,
-		callback = function(on)
-			s.silent = on
-			if on and not Aim.installHooks() then
-				toast("Silent aim unavailable", "Your executor has no hookmetamethod.", 4)
-			end
-		end,
-	})
-	COMP.Slider(gSil, {
-		key = "aim.hitchance",
-		text = "Hit chance",
-		min = 1,
-		max = 100,
-		step = 1,
-		default = s.hitChance,
-		suffix = "%",
-		callback = function(v)
-			s.hitChance = v
-		end,
-	})
-
 	local gTgt = gated(COMP.Group(page, "Targeting"))
 	COMP.Toggle(gTgt, {
 		key = "aim.team",
 		text = "Team check",
-		desc = "Ignore players on your team",
+		desc = "Ignore players on your team (NPCs have no team)",
 		default = s.teamCheck,
 		callback = function(on)
 			s.teamCheck = on
@@ -6841,7 +7345,7 @@ do
 	COMP.Toggle(gTgt, {
 		key = "aim.wall",
 		text = "Wall check",
-		desc = "Ignore players you can't see",
+		desc = "Ignore targets you can't see",
 		default = s.wallCheck,
 		callback = function(on)
 			s.wallCheck = on
@@ -6875,37 +7379,6 @@ do
 			s.fovColor = c
 		end,
 	})
-
-	local gTrig = gated(COMP.Group(page, "Triggerbot"))
-	COMP.Toggle(gTrig, {
-		key = "aim.trigger",
-		text = "Triggerbot",
-		desc = "Clicks when your crosshair is on an enemy",
-		default = false,
-		callback = function(on)
-			s.trigger = on
-		end,
-	})
-	COMP.Slider(gTrig, {
-		key = "aim.triggerdelay",
-		text = "Delay",
-		min = 0,
-		max = 500,
-		step = 10,
-		default = s.triggerDelay,
-		suffix = " ms",
-		callback = function(v)
-			s.triggerDelay = v
-		end,
-	})
-	COMP.Toggle(gTrig, {
-		key = "aim.triggerhold",
-		text = "Only while aim key held",
-		default = s.triggerHold,
-		callback = function(on)
-			s.triggerHold = on
-		end,
-	})
 end
 Access.fire()
 
@@ -6931,6 +7404,7 @@ do
 		return (tostring(ev.k):gsub("(%l)(%u)", "%1 %2"))
 	end
 	local function press(ev, down)
+		Macros.lastSynth = os.clock()
 		pcall(function()
 			if ev.kind == "mouse" then
 				local btn = ev.k == "MouseButton1" and 0 or (ev.k == "MouseButton2" and 1 or 2)
@@ -6961,10 +7435,8 @@ do
 		local token = { cancel = false }
 		Macros.playing[m] = token
 		task.spawn(function()
-			local n = 0
 			local speed = math.max(tonumber(m.speed) or 1, 0.05)
-			while not token.cancel and (m.loops == 0 or n < m.loops) do
-				n += 1
+			repeat
 				for _, ev in ipairs(m.events) do
 					if token.cancel then
 						break
@@ -6983,10 +7455,10 @@ do
 				if last and not token.cancel then
 					task.wait((math.max(tonumber(last.hold) or 50, 10) / 1000 / speed) + 0.02)
 				end
-				if not token.cancel and (tonumber(m.gap) or 0) > 0 then
+				if m.mode == "repeat" and not token.cancel and (tonumber(m.gap) or 0) > 0 then
 					task.wait(m.gap / 1000)
 				end
-			end
+			until token.cancel or m.mode ~= "repeat"
 			Macros.playing[m] = nil
 			refreshList()
 			refreshEditor()
@@ -7149,19 +7621,15 @@ do
 			end
 		end,
 	})
-	local loopsS = COMP.Slider(gEdit, {
-		text = "Repeat",
-		min = 0,
-		max = 50,
-		step = 1,
-		default = 1,
-		format = function(v)
-			return v < 0.5 and "Forever" or (math.floor(v + 0.5) .. "x")
-		end,
+	local modeD = COMP.Dropdown(gEdit, {
+		text = "Mode",
+		options = { "Do once", "Repeat" },
+		default = "Do once",
 		callback = function(v)
 			if Macros.sel then
-				Macros.sel.loops = v
+				Macros.sel.mode = v == "Repeat" and "repeat" or "once"
 				Cfg.dirty()
+				refreshList()
 			end
 		end,
 	})
@@ -7295,7 +7763,7 @@ do
 		end
 		nameIn.Box.Text = m.name
 		speedS.Set(tonumber(m.speed) or 1, true)
-		loopsS.Set(tonumber(m.loops) or 1, true)
+		modeD.Set(m.mode == "repeat" and "Repeat" or "Do once", true)
 		gapS.Set(tonumber(m.gap) or 0, true)
 		hkBtn.SetText(m.hotkey and tostring(m.hotkey):gsub("(%l)(%u)", "%1 %2") or "None")
 		if Macros.playing[m] then
@@ -7324,7 +7792,7 @@ do
 			Position = UDim2.new(1, -16, 0.5, 0),
 		})
 		nb.Button.MouseButton1Click:Connect(function()
-			local m = { name = "Macro " .. (#Macros.list + 1), speed = 1, loops = 1, gap = 0, events = {} }
+			local m = { name = "Macro " .. (#Macros.list + 1), speed = 1, mode = "once", gap = 0, events = {} }
 			table.insert(Macros.list, m)
 			Cfg.dirty()
 			selectMacro(m)
@@ -7340,7 +7808,7 @@ do
 				TextTruncate = Enum.TextTruncate.AtEnd,
 			}, row)
 			label({
-				Text = #m.events .. " keys   " .. (tonumber(m.speed) or 1) .. "x" .. (m.hotkey and ("   [" .. tostring(m.hotkey) .. "]") or ""),
+				Text = #m.events .. " keys   " .. (m.mode == "repeat" and "repeat" or "once") .. "   " .. (tonumber(m.speed) or 1) .. "x" .. (m.hotkey and ("   [" .. tostring(m.hotkey) .. "]") or ""),
 				Position = UDim2.fromOffset(16, 31),
 				Size = UDim2.new(1, -200, 0, 14),
 				TextSize = 12,
@@ -7397,7 +7865,7 @@ do
 			end
 			return
 		end
-		if typing() or state.listening then
+		if typing() or state.listening or os.clock() - (Macros.lastSynth or 0) < 0.06 then
 			return
 		end
 		if input.UserInputType == Enum.UserInputType.Keyboard then
@@ -7440,7 +7908,7 @@ do
 				table.insert(Macros.list, {
 					name = tostring(m.name or "Macro"),
 					speed = tonumber(m.speed) or 1,
-					loops = tonumber(m.loops) or 1,
+					mode = (m.mode == "repeat" or (m.mode == nil and (tonumber(m.loops) or 1) ~= 1)) and "repeat" or "once",
 					gap = tonumber(m.gap) or 0,
 					hotkey = type(m.hotkey) == "string" and m.hotkey or nil,
 					events = m.events,
